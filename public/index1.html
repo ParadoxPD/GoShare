@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Transfer</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>File Transfer</h1>
+    <button onclick="receiveMode()">Receive</button>
+    <button onclick="sendMode()">Send</button>
+
+    <div id="app"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+    <script>
+      let ws = new WebSocket(`ws://${location.host}/ws`);
+      let code;
+      let isConnected = false;
+      let currentMode = ""; // 'send' or 'receive'
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("[WS MESSAGE RECEIVED]:", data);
+
+        if (data.type === "code" && currentMode === "receive") {
+          code = data.code;
+          const app = document.getElementById("app");
+          app.innerHTML = `<h2>Join Code: ${code}</h2><canvas id="qr"></canvas>`;
+          QRCode.toCanvas(document.getElementById("qr"), code);
+        }
+
+        if (data.type === "connected" && currentMode === "send") {
+          console.log("[CONNECTED] Sender received confirmation");
+          isConnected = true;
+          alert("Connected to peer!");
+          document.getElementById("fileInput").style.display = "inline";
+          document.getElementById("uploadButton").style.display = "inline";
+        }
+
+        if (data.type === "connected" && currentMode === "receive") {
+          console.log("[CONNECTED] Receiver confirmed");
+          isConnected = true;
+        }
+
+        if (data.type === "file" && currentMode === "receive") {
+          console.log("[RECEIVING FILE]:", data.name);
+
+          const byteCharacters = atob(data.content);
+          const byteArray = new Uint8Array(byteCharacters.length);
+          for (let i = 0; i < byteCharacters.length; i++) {
+            byteArray[i] = byteCharacters.charCodeAt(i);
+          }
+
+          const blob = new Blob([byteArray]);
+          const link = document.createElement("a");
+          link.href = URL.createObjectURL(blob);
+          link.download = data.name;
+          link.click();
+        }
+
+        if (data.type === "error") {
+          alert("Error: " + data.content);
+        }
+      };
+
+      function receiveMode() {
+        currentMode = "receive";
+        isConnected = true; // receiving side is always ready
+        ws.send(JSON.stringify({ type: "register" }));
+      }
+
+      function sendMode() {
+        currentMode = "send";
+        const app = document.getElementById("app");
+        app.innerHTML = `
+      <input id="joinCode" placeholder="Enter Join Code"><br>
+      <button onclick="connectToPeer()">Connect</button>
+      <br><br>
+      <input type="file" id="fileInput" style="display:none;"><br>
+      <button id="uploadButton" style="display:none;" onclick="uploadFile()">Upload</button>
+    `;
+      }
+
+      function connectToPeer() {
+        const joinCode = document.getElementById("joinCode").value;
+        code = joinCode; // Save for upload
+        if (!joinCode) {
+          alert("Please enter a Join Code.");
+          return;
+        }
+        ws.send(JSON.stringify({ type: "connect", code: joinCode }));
+      }
+
+      async function encrypt(data, key) {
+        const cryptoKey = await window.crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(key),
+          "AES-CBC",
+          false,
+          ["encrypt"],
+        );
+
+        const iv = crypto.getRandomValues(new Uint8Array(16));
+        const encrypted = await window.crypto.subtle.encrypt(
+          { name: "AES-CBC", iv },
+          cryptoKey,
+          new TextEncoder().encode(data),
+        );
+
+        const combined = new Uint8Array(iv.byteLength + encrypted.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(encrypted), iv.byteLength);
+        return btoa(String.fromCharCode(...combined));
+      }
+
+      async function uploadFile() {
+        const code = document.getElementById("joinCode").value;
+        const file = document.getElementById("fileInput").files[0];
+        if (!file) return;
+        const chunkSize = 64 * 1024; // 64KB
+        const totalChunks = Math.ceil(file.size / chunkSize);
+
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = file.slice(i * chunkSize, (i + 1) * chunkSize);
+          const buffer = await chunk.arrayBuffer();
+          const encrypted = await encryptBuffer(buffer, key); // Your encryption logic
+          ws.send(
+            JSON.stringify({
+              type: "chunk",
+              code,
+              index: i,
+              name: file.name,
+              content: arrayBufferToBase64(encrypted),
+            }),
+          );
+        }
+
+        ws.send(JSON.stringify({ type: "done", code, name: file.name }));
+      }
+
+      async function encrypt(text, key) {
+        const iv = crypto.getRandomValues(new Uint8Array(16));
+        const encoder = new TextEncoder();
+        const keyBytes = encoder.encode(key);
+        const cryptoKey = await crypto.subtle.importKey(
+          "raw",
+          keyBytes,
+          "AES-CBC",
+          false,
+          ["encrypt"],
+        );
+        const padded = pkcs7Pad(encoder.encode(text));
+        const encrypted = await crypto.subtle.encrypt(
+          { name: "AES-CBC", iv },
+          cryptoKey,
+          padded,
+        );
+
+        // Join IV + encrypted bytes
+        const joined = new Uint8Array(iv.byteLength + encrypted.byteLength);
+        joined.set(iv, 0);
+        joined.set(new Uint8Array(encrypted), iv.byteLength);
+
+        // Convert to base64
+        return btoa(String.fromCharCode(...joined));
+      }
+
+      function pkcs7Pad(data) {
+        return data;
+        const blockSize = 16;
+        const pad = blockSize - (data.length % blockSize);
+        const padded = new Uint8Array(data.length + pad);
+        padded.set(data);
+        padded.fill(pad, data.length);
+        return padded;
+      }
+    </script>
+  </body>
+</html>

@@ -9,6 +9,9 @@
         font-family: sans-serif;
         padding: 2rem;
       }
+      #progress {
+        margin-top: 1rem;
+      }
     </style>
   </head>
   <body>
@@ -17,28 +20,44 @@
     <button onclick="sendMode()">Send</button>
 
     <div id="app"></div>
+    <div id="progress"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
     <script>
+      const CHUNK_SIZE = 64 * 1024; // 64KB
+      const encryptionKey = "examplekey123456";
       let ws = new WebSocket(`ws://${location.host}/ws`);
       let code;
-      let isConnected = false;
 
       function receiveMode() {
         ws.send(JSON.stringify({ type: "register" }));
+        let receivedChunks = [];
 
-        ws.onmessage = (event) => {
+        ws.onmessage = async (event) => {
           const data = JSON.parse(event.data);
+          console.log("Receiver got:", data);
+
           if (data.type === "code") {
+            // Show QR and Join Code
             code = data.code;
             const app = document.getElementById("app");
-            app.innerHTML = `<h2>Join Code: ${code}</h2><canvas id="qr"></canvas>`;
+            app.innerHTML = `<h2>Join Code: ${code}</h2><canvas id="qr"></canvas><p id="progress"></p>`;
             QRCode.toCanvas(document.getElementById("qr"), code);
-          } else if (data.type === "file") {
-            const link = document.createElement("a");
-            link.href = data.content;
-            link.download = data.name;
-            link.click();
+          } else if (data.type === "chunk") {
+            const chunk = await decryptBase64Chunk(data.content, encryptionKey);
+            receivedChunks.push(chunk);
+            document.getElementById("progress").innerText =
+              `Received ${receivedChunks.length} chunks`;
+          } else if (data.type === "done") {
+            const blob = new Blob(receivedChunks);
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = data.name;
+            a.click();
+            receivedChunks = [];
+            document.getElementById("progress").innerText +=
+              "\nDownload complete.";
           }
         };
       }
@@ -47,88 +66,99 @@
         const app = document.getElementById("app");
         app.innerHTML = `
         <input id="joinCode" placeholder="Enter Join Code"><br>
-        <button onclick="connectToPeer()">Connect</button>
-        <br><br>
-        <input type="file" id="fileInput" style="display:none;"><br>
-        <button id="uploadButton" style="display:none;" onclick="uploadFile()">Upload</button>
+        <input type="file" id="fileInput"><br>
+        <button onclick="connectAndUpload()">Connect & Upload</button>
       `;
       }
 
-      function connectToPeer() {
-        const joinCode = document.getElementById("joinCode").value;
+      const connectAndUpload = async () => {
+        const inputCode = document.getElementById("joinCode").value;
+        const file = document.getElementById("fileInput").files[0];
+        if (!inputCode || !file) return;
 
-        if (!joinCode) {
-          alert("Please enter a Join Code.");
-          return;
-        }
+        ws.send(JSON.stringify({ type: "connect", code: inputCode }));
 
-        ws.send(JSON.stringify({ type: "connect", code: joinCode }));
-
-        ws.onmessage = (event) => {
+        const onConnected = async (event) => {
           const data = JSON.parse(event.data);
+          console.log("Sender got:", data);
 
           if (data.type === "connected") {
-            // Successful connection
-            isConnected = true;
-            document.getElementById("uploadButton").style.display = "inline"; // Show upload button
-            document.getElementById("fileInput").style.display = "inline"; // Show upload button
-            alert("Connection successful! You can now upload files.");
-          } else if (data.type === "error") {
-            alert("Failed to connect. Invalid Join Code.");
+            ws.removeEventListener("message", onConnected); // Avoid duplicate sends
+            await sendFileInChunks(file, inputCode);
           }
         };
-      }
 
-      async function encrypt(data, key) {
-        const cryptoKey = await window.crypto.subtle.importKey(
-          "raw",
-          new TextEncoder().encode(key),
-          "AES-CBC",
-          false,
-          ["encrypt"],
-        );
+        ws.addEventListener("message", onConnected);
+      };
 
-        const iv = crypto.getRandomValues(new Uint8Array(16));
-        const encrypted = await window.crypto.subtle.encrypt(
-          { name: "AES-CBC", iv },
-          cryptoKey,
-          new TextEncoder().encode(data),
-        );
+      async function sendFileInChunks(file, code) {
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        const progress = document.getElementById("progress");
+        console.log(file);
 
-        const combined = new Uint8Array(iv.byteLength + encrypted.byteLength);
-        combined.set(iv, 0);
-        combined.set(new Uint8Array(encrypted), iv.byteLength);
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          const buffer = await chunk.arrayBuffer();
+          const encrypted = await encryptBuffer(buffer, encryptionKey);
 
-        // Convert to Base64
-        return btoa(String.fromCharCode.apply(null, combined));
-      }
-
-      async function uploadFile() {
-        const file = document.getElementById("fileInput").files[0];
-
-        if (!file || !isConnected) {
-          alert("Please connect and select a file.");
-          return;
-        }
-
-        const reader = new FileReader();
-        reader.onload = async () => {
-          // Encrypt the file contents
-          const encrypted = await encrypt(reader.result, "examplekey123456");
-          console.log("Sending");
-          console.log(encrypted);
-
-          // Send the file to the server with the encrypted data
           ws.send(
             JSON.stringify({
-              type: "file",
+              type: "chunk",
               code,
+              index: i,
               name: file.name,
               content: encrypted,
             }),
           );
-        };
-        reader.readAsText(file); // Use readAsArrayBuffer() for non-text files
+
+          progress.innerText = `Sent ${i + 1}/${totalChunks} chunks`;
+        }
+
+        ws.send(JSON.stringify({ type: "done", code, name: file.name }));
+        progress.innerText += `\nUpload complete.`;
+      }
+
+      async function encryptBuffer(buffer, keyStr) {
+        const key = await window.crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(keyStr),
+          "AES-CBC",
+          false,
+          ["encrypt"],
+        );
+        const iv = window.crypto.getRandomValues(new Uint8Array(16));
+        const encrypted = await window.crypto.subtle.encrypt(
+          { name: "AES-CBC", iv: iv },
+          key,
+          buffer,
+        );
+        const combined = new Uint8Array(iv.byteLength + encrypted.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(encrypted), iv.byteLength);
+        return btoa(String.fromCharCode(...combined));
+      }
+
+      async function decryptBase64Chunk(base64, keyStr) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const iv = bytes.slice(0, 16);
+        const data = bytes.slice(16);
+
+        const key = await window.crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(keyStr),
+          "AES-CBC",
+          false,
+          ["decrypt"],
+        );
+        const decrypted = await window.crypto.subtle.decrypt(
+          { name: "AES-CBC", iv: iv },
+          key,
+          data,
+        );
+
+        return new Uint8Array(decrypted);
       }
     </script>
   </body>

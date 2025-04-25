@@ -1,10 +1,7 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"encoding/base32"
-	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -19,17 +16,21 @@ type Message struct {
 	Type    string `json:"type"`
 	Code    string `json:"code,omitempty"`
 	Name    string `json:"name,omitempty"`
+	Index   int    `json:"index,omitempty"`
 	Content string `json:"content,omitempty"`
 }
 
+type Session struct {
+	Receiver *websocket.Conn
+	Sender   *websocket.Conn
+}
+
 var upgrader = websocket.Upgrader{}
-var peers = make(map[string]*websocket.Conn)
+var sessions = make(map[string]*Session)
 var peersLock sync.Mutex
 
 var hotpSecret = base32.StdEncoding.EncodeToString([]byte("your-secret-key"))
-
 var counter uint64 = uint64(time.Now().Unix())
-var aesKey = []byte("examplekey123456") // 16 bytes for AES-128
 
 func main() {
 	http.Handle("/", http.FileServer(http.Dir("./public")))
@@ -60,38 +61,49 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case "register":
+			log.Printf("Received: %+v", msg)
+			//NOTE: Check if the joinCode is unique
 			joinCode = generateJoinCode()
 			peersLock.Lock()
-			peers[joinCode] = conn
+			sessions[joinCode] = &Session{Receiver: conn}
 			peersLock.Unlock()
 			conn.WriteJSON(Message{Type: "code", Code: joinCode})
 		case "connect":
+			log.Printf("Received: %+v", msg)
 			peersLock.Lock()
-			peer, ok := peers[msg.Code]
+			session, ok := sessions[msg.Code]
 			peersLock.Unlock()
 			if ok {
-				peer.WriteJSON(Message{Type: "connected"})
-				conn.WriteJSON(Message{Type: "connected"})
-				peersLock.Lock()
-				peers[msg.Code] = conn
-				peersLock.Unlock()
+				session.Sender = conn
+				session.Sender.WriteJSON(Message{Type: "connected"})
+				session.Receiver.WriteJSON(Message{Type: "connected"})
 			} else {
 				conn.WriteJSON(Message{Type: "error", Content: "Invalid code"})
 			}
-		case "file":
-			decrypted, err := decrypt(msg.Content)
-			if err != nil {
-				log.Println("Decryption error:", err)
-				continue
-			}
+		case "chunk":
 			peersLock.Lock()
-			peer, ok := peers[msg.Code]
+			session, ok := sessions[msg.Code]
 			peersLock.Unlock()
-			if ok {
-				peer.WriteJSON(Message{
-					Type:    "file",
+			if ok && session.Receiver != nil {
+				err := session.Receiver.WriteJSON(Message{
+					Type:    "chunk",
+					Index:   msg.Index,
 					Name:    msg.Name,
-					Content: decrypted,
+					Content: msg.Content,
+				})
+				if err != nil {
+					log.Println("Error forwarding chunk:", err)
+				}
+			}
+		case "done":
+			log.Printf("Received: %+v", msg)
+			peersLock.Lock()
+			session, ok := sessions[msg.Code]
+			peersLock.Unlock()
+			if ok && session.Receiver != nil {
+				session.Receiver.WriteJSON(Message{
+					Type: "done",
+					Name: msg.Name,
 				})
 			}
 		}
@@ -99,36 +111,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if joinCode != "" {
 		peersLock.Lock()
-		delete(peers, joinCode)
+		delete(sessions, joinCode)
 		peersLock.Unlock()
 	}
 }
 
 func generateJoinCode() string {
 	counter++
-	code, err := hotp.GenerateCode(hotpSecret, counter)
+	code, err := hotp.GenerateCode(string(hotpSecret), counter)
 	if err != nil {
 		log.Println("HOTP generation failed:", err)
-		return "000000"
+		return fmt.Sprintf("%06d", 000000)
 	}
 	return code
-}
-
-func decrypt(cipherText string) (string, error) {
-	data, err := base64.StdEncoding.DecodeString(cipherText)
-	if err != nil {
-		return "", err
-	}
-	block, err := aes.NewCipher(aesKey)
-	if err != nil {
-		return "", err
-	}
-	if len(data) < aes.BlockSize {
-		return "", fmt.Errorf("ciphertext too short")
-	}
-	iv := data[:aes.BlockSize]
-	data = data[aes.BlockSize:]
-	stream := cipher.NewCFBDecrypter(block, iv)
-	stream.XORKeyStream(data, data)
-	return string(data), nil
 }
