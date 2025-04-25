@@ -44,12 +44,19 @@
             app.innerHTML = `<h2>Join Code: ${code}</h2><canvas id="qr"></canvas><p id="progress"></p>`;
             QRCode.toCanvas(document.getElementById("qr"), code);
           } else if (data.type === "chunk") {
-            const chunk = await decryptBase64Chunk(data.content, encryptionKey);
-            receivedChunks.push(chunk);
+            receivedChunks.push(data.content);
             document.getElementById("progress").innerText =
               `Received ${receivedChunks.length} chunks`;
           } else if (data.type === "done") {
-            const blob = new Blob(receivedChunks);
+            console.log("Recieceed : ", receivedChunks);
+            let decryptedChunks = [];
+            for (let index = 0; index < receivedChunks.length; index++)
+              decryptedChunks[index] = await decryptBase64Chunk(
+                receivedChunks[index],
+                encryptionKey,
+              );
+
+            const blob = new Blob(decryptedChunks);
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
@@ -158,7 +165,7 @@
           data,
         );
 
-        return new Uint8Array(decrypted);
+        return new TextDecoder().decode(new Uint8Array(decrypted));
       }
     </script>
   </body>
