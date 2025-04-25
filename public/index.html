@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Transfer</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>File Transfer</h1>
+    <button onclick="receiveMode()">Receive</button>
+    <button onclick="sendMode()">Send</button>
+
+    <div id="app"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+    <script>
+      let ws = new WebSocket(`ws://${location.host}/ws`);
+      let code;
+      let isConnected = false;
+
+      function receiveMode() {
+        ws.send(JSON.stringify({ type: "register" }));
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === "code") {
+            code = data.code;
+            const app = document.getElementById("app");
+            app.innerHTML = `<h2>Join Code: ${code}</h2><canvas id="qr"></canvas>`;
+            QRCode.toCanvas(document.getElementById("qr"), code);
+          } else if (data.type === "file") {
+            const link = document.createElement("a");
+            link.href = data.content;
+            link.download = data.name;
+            link.click();
+          }
+        };
+      }
+
+      function sendMode() {
+        const app = document.getElementById("app");
+        app.innerHTML = `
+        <input id="joinCode" placeholder="Enter Join Code"><br>
+        <button onclick="connectToPeer()">Connect</button>
+        <br><br>
+        <input type="file" id="fileInput" style="display:none;"><br>
+        <button id="uploadButton" style="display:none;" onclick="uploadFile()">Upload</button>
+      `;
+      }
+
+      function connectToPeer() {
+        const joinCode = document.getElementById("joinCode").value;
+
+        if (!joinCode) {
+          alert("Please enter a Join Code.");
+          return;
+        }
+
+        ws.send(JSON.stringify({ type: "connect", code: joinCode }));
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+
+          if (data.type === "connected") {
+            // Successful connection
+            isConnected = true;
+            document.getElementById("uploadButton").style.display = "inline"; // Show upload button
+            document.getElementById("fileInput").style.display = "inline"; // Show upload button
+            alert("Connection successful! You can now upload files.");
+          } else if (data.type === "error") {
+            alert("Failed to connect. Invalid Join Code.");
+          }
+        };
+      }
+
+      async function encrypt(data, key) {
+        const cryptoKey = await window.crypto.subtle.importKey(
+          "raw",
+          new TextEncoder().encode(key),
+          "AES-CBC",
+          false,
+          ["encrypt"],
+        );
+
+        const iv = crypto.getRandomValues(new Uint8Array(16));
+        const encrypted = await window.crypto.subtle.encrypt(
+          { name: "AES-CBC", iv },
+          cryptoKey,
+          new TextEncoder().encode(data),
+        );
+
+        const combined = new Uint8Array(iv.byteLength + encrypted.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(encrypted), iv.byteLength);
+
+        // Convert to Base64
+        return btoa(String.fromCharCode.apply(null, combined));
+      }
+
+      async function uploadFile() {
+        const file = document.getElementById("fileInput").files[0];
+
+        if (!file || !isConnected) {
+          alert("Please connect and select a file.");
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = async () => {
+          // Encrypt the file contents
+          const encrypted = await encrypt(reader.result, "examplekey123456");
+          console.log("Sending");
+          console.log(encrypted);
+
+          // Send the file to the server with the encrypted data
+          ws.send(
+            JSON.stringify({
+              type: "file",
+              code,
+              name: file.name,
+              content: encrypted,
+            }),
+          );
+        };
+        reader.readAsText(file); // Use readAsArrayBuffer() for non-text files
+      }
+    </script>
+  </body>
+</html>
