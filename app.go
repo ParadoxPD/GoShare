@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 	"github.com/pquerna/otp/hotp"
 )
 
@@ -29,15 +31,15 @@ type Message struct {
 	Code        string `json:"code,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Size        int64  `json:"size,omitempty"`
-	TotalChunks int    `json:"totalChunks,omitempty"`
-	Index       int    `json:"index,omitempty"`
+	TotalChunks int    `json:"totalChunks"` // Removed omitempty
+	Index       int    `json:"index"`       // Removed omitempty (Fixes missing chunk 0)
 	Content     string `json:"content,omitempty"`
 	Error       string `json:"error,omitempty"`
 	ReceiverID  string `json:"receiverId,omitempty"`
 	FileID      string `json:"fileId,omitempty"`
-	FileIndex   int    `json:"fileIndex,omitempty"`
-	TotalFiles  int    `json:"totalFiles,omitempty"`
-	Receivers   int    `json:"receivers,omitempty"`
+	FileIndex   int    `json:"fileIndex"`  // Removed omitempty
+	TotalFiles  int    `json:"totalFiles"` // Removed omitempty
+	Receivers   int    `json:"receivers"`  // Removed omitempty
 	Text        string `json:"text,omitempty"`
 	MessageID   string `json:"messageId,omitempty"`
 	Timestamp   int64  `json:"timestamp,omitempty"`
@@ -70,12 +72,27 @@ var upgrader = websocket.Upgrader{
 var (
 	sessions     = make(map[string]*Session)
 	sessionsLock sync.RWMutex
-	hotpSecret          = base32.StdEncoding.EncodeToString([]byte("your-secret-key-change-in-production"))
+	hotpSecret          = ""
 	counter      uint64 = uint64(time.Now().Unix())
 	counterLock  sync.Mutex
 )
 
 func main() {
+	godotenv.Load()
+
+	// Default encryption key warning
+	if os.Getenv("GOSHARE_ENCRYPTION_KEY") == "" {
+		log.Println("WARNING: GOSHARE_ENCRYPTION_KEY is not set. Using default insecure key.")
+		os.Setenv("GOSHARE_ENCRYPTION_KEY", "default-insecure-key-123")
+	}
+
+	hotpSecretRaw := os.Getenv("GOSHARE_HOTP_SECRET")
+	if hotpSecretRaw == "" {
+		log.Println("WARNING: GOSHARE_HOTP_SECRET is not set. Using default insecure key.")
+		hotpSecretRaw = "defaultsecret" // Fallback
+	}
+	hotpSecret = base32.StdEncoding.EncodeToString([]byte(hotpSecretRaw))
+
 	// Start session cleanup routine
 	go cleanupExpiredSessions()
 
@@ -83,8 +100,19 @@ func main() {
 	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/health", healthCheck)
+	http.HandleFunc("/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"key": os.Getenv("GOSHARE_ENCRYPTION_KEY"),
+		})
+	})
 
-	port := ":4000"
+	port := fmt.Sprintf(":%s", os.Getenv("PORT"))
+	if port == ":" {
+		log.Fatal("PORT not defined")
+		os.Exit(1)
+	}
+
 	fmt.Printf("🚀 Server started at http://localhost%s\n", port)
 	log.Fatal(http.ListenAndServe(port, nil))
 }
@@ -182,6 +210,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				} else if isSender {
 					// Sender disconnected, notify all receivers
 					log.Printf("Sender disconnected from session %s", sessionCode)
+					session.Sender = nil // Mark sender as gone
 					for _, receiver := range session.Receivers {
 						disconnectMsg := Message{Type: "sender_disconnected"}
 						msgBytes, _ := json.Marshal(disconnectMsg)
@@ -227,43 +256,33 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.SetReadDeadline(time.Now().Add(ReadTimeout))
 
 		switch msg.Type {
-		case "register":
-			// Create new session for receiver
+		case "create_session":
 			code := generateJoinCode()
 			sessionCode = code
-			receiverID = uuid.New().String()
+			isSender = true
 
 			session := &Session{
 				Code:         code,
 				Receivers:    make(map[string]*Receiver),
 				CreatedAt:    time.Now(),
 				LastActivity: time.Now(),
+				Sender:       conn,
 			}
-
-			receiver := &Receiver{
-				Conn:     conn,
-				ID:       receiverID,
-				JoinedAt: time.Now(),
-			}
-
-			session.Receivers[receiverID] = receiver
 
 			sessionsLock.Lock()
 			sessions[code] = session
 			sessionsLock.Unlock()
 
-			log.Printf("New session created: %s (receiver: %s)", code, receiverID)
+			log.Printf("New session created by sender: %s", code)
 
 			responseMsg := Message{
-				Type:       "code",
-				Code:       code,
-				ReceiverID: receiverID,
+				Type: "code",
+				Code: code,
 			}
 			responseBytes, _ := json.Marshal(responseMsg)
 			conn.WriteMessage(websocket.TextMessage, responseBytes)
 
 		case "join":
-			// Additional receiver joining existing session
 			code := msg.Code
 			sessionCode = code
 			receiverID = uuid.New().String()
@@ -276,7 +295,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				errorMsg := Message{Type: "error", Error: "Invalid code"}
 				errorBytes, _ := json.Marshal(errorMsg)
 				conn.WriteMessage(websocket.TextMessage, errorBytes)
-				return
+				return // Disconnect
 			}
 
 			session.mu.Lock()
@@ -300,7 +319,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 			log.Printf("Receiver %s joined session %s (%d total)", receiverID, code, receiverCount)
 
-			// Send confirmation to new receiver
 			joinedMsg := Message{
 				Type:       "joined",
 				ReceiverID: receiverID,
@@ -309,7 +327,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			joinedBytes, _ := json.Marshal(joinedMsg)
 			conn.WriteMessage(websocket.TextMessage, joinedBytes)
 
-			// Notify sender about new receiver
 			session.mu.RLock()
 			if session.Sender != nil {
 				notifyMsg := Message{
@@ -321,160 +338,17 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			session.mu.RUnlock()
 
-		case "connect":
-			// Sender connecting to session
-			code := msg.Code
-			sessionCode = code
-			isSender = true
-
-			sessionsLock.RLock()
-			session, exists := sessions[code]
-			sessionsLock.RUnlock()
-
-			if !exists {
-				errorMsg := Message{Type: "error", Error: "Invalid code"}
-				errorBytes, _ := json.Marshal(errorMsg)
-				conn.WriteMessage(websocket.TextMessage, errorBytes)
-				return
-			}
-
-			session.mu.Lock()
-			session.Sender = conn
-			receiverCount := len(session.Receivers)
-			session.LastActivity = time.Now()
-			session.mu.Unlock()
-
-			log.Printf("Sender connected to session %s (%d receivers)", code, receiverCount)
-
-			// Notify sender
-			connectedMsg := Message{
-				Type:      "connected",
-				Receivers: receiverCount,
-			}
-			connectedBytes, _ := json.Marshal(connectedMsg)
-			conn.WriteMessage(websocket.TextMessage, connectedBytes)
-
-			// Notify all receivers
-			session.mu.RLock()
-			for _, receiver := range session.Receivers {
-				receiver.mu.Lock()
-				senderConnectedMsg := Message{Type: "sender_connected"}
-				msgBytes, _ := json.Marshal(senderConnectedMsg)
-				receiver.Conn.WriteMessage(websocket.TextMessage, msgBytes)
-				receiver.mu.Unlock()
-			}
-			session.mu.RUnlock()
-
 		case "metadata":
-			// Forward metadata to all receivers
-			sessionsLock.RLock()
-			session, exists := sessions[msg.Code]
-			sessionsLock.RUnlock()
-
-			if exists {
-				session.mu.Lock()
-				session.LastActivity = time.Now()
-				session.mu.Unlock()
-
-				metadataMsg := Message{
-					Type:        "metadata",
-					Name:        msg.Name,
-					Size:        msg.Size,
-					TotalChunks: msg.TotalChunks,
-					FileID:      msg.FileID,
-					FileIndex:   msg.FileIndex,
-					TotalFiles:  msg.TotalFiles,
-				}
-				metadataBytes, _ := json.Marshal(metadataMsg)
-
-				session.mu.RLock()
-				for _, receiver := range session.Receivers {
-					receiver.mu.Lock()
-					receiver.Conn.WriteMessage(websocket.TextMessage, metadataBytes)
-					receiver.mu.Unlock()
-				}
-				session.mu.RUnlock()
-
-				log.Printf("Forwarded metadata for %s to %d receivers", msg.Name, len(session.Receivers))
-			}
+			broadcastToReceivers(msg, "metadata")
 
 		case "chunk":
-			// Forward chunk to all receivers
-			sessionsLock.RLock()
-			session, exists := sessions[msg.Code]
-			sessionsLock.RUnlock()
-
-			if exists {
-				session.mu.Lock()
-				session.LastActivity = time.Now()
-				session.mu.Unlock()
-
-				chunkMsg := Message{
-					Type:    "chunk",
-					Index:   msg.Index,
-					Content: msg.Content,
-					FileID:  msg.FileID,
-				}
-				chunkBytes, _ := json.Marshal(chunkMsg)
-
-				session.mu.RLock()
-				for _, receiver := range session.Receivers {
-					receiver.mu.Lock()
-					receiver.Conn.WriteMessage(websocket.TextMessage, chunkBytes)
-					receiver.mu.Unlock()
-				}
-				session.mu.RUnlock()
-			}
+			broadcastToReceivers(msg, "chunk")
 
 		case "done":
-			// Forward completion message to all receivers
-			sessionsLock.RLock()
-			session, exists := sessions[msg.Code]
-			sessionsLock.RUnlock()
-
-			if exists {
-				session.mu.Lock()
-				session.LastActivity = time.Now()
-				session.mu.Unlock()
-
-				doneMsg := Message{
-					Type:   "done",
-					Name:   msg.Name,
-					FileID: msg.FileID,
-				}
-				doneBytes, _ := json.Marshal(doneMsg)
-
-				session.mu.RLock()
-				for _, receiver := range session.Receivers {
-					receiver.mu.Lock()
-					receiver.Conn.WriteMessage(websocket.TextMessage, doneBytes)
-					receiver.mu.Unlock()
-				}
-				session.mu.RUnlock()
-
-				log.Printf("Transfer complete: %s", msg.Name)
-			}
+			broadcastToReceivers(msg, "done")
 
 		case "all_done":
-			// All files sent
-			sessionsLock.RLock()
-			session, exists := sessions[msg.Code]
-			sessionsLock.RUnlock()
-
-			if exists {
-				allDoneMsg := Message{Type: "all_done"}
-				allDoneBytes, _ := json.Marshal(allDoneMsg)
-
-				session.mu.RLock()
-				for _, receiver := range session.Receivers {
-					receiver.mu.Lock()
-					receiver.Conn.WriteMessage(websocket.TextMessage, allDoneBytes)
-					receiver.mu.Unlock()
-				}
-				session.mu.RUnlock()
-
-				log.Printf("All files transferred for session %s", msg.Code)
-			}
+			broadcastToReceivers(msg, "all_done")
 
 		case "text_message":
 			// Forward encrypted text message to all receivers
@@ -501,14 +375,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					receiver.mu.Lock()
 					if err := receiver.Conn.WriteMessage(websocket.TextMessage, textMsgBytes); err == nil {
 						receiverCount++
+					} else {
+						log.Printf("Error sending text to receiver %s: %v", receiver.ID, err)
 					}
 					receiver.mu.Unlock()
 				}
 				session.mu.RUnlock()
 
-				log.Printf("Text message forwarded to %d receivers in session %s", receiverCount, msg.Code)
-
-				// Send acknowledgment back to sender
 				ackMsg := Message{
 					Type:      "text_ack",
 					MessageID: msg.MessageID,
@@ -518,6 +391,35 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				conn.WriteMessage(websocket.TextMessage, ackBytes)
 			}
 		}
+	}
+}
+
+// Helper to reduce code duplication and handle broadcast errors
+func broadcastToReceivers(msg Message, msgType string) {
+	sessionsLock.RLock()
+	session, exists := sessions[msg.Code]
+	sessionsLock.RUnlock()
+
+	if exists {
+		session.mu.Lock()
+		session.LastActivity = time.Now()
+		session.mu.Unlock()
+
+		// Construct message to forward (stripping some internal fields if needed)
+		forwardMsg := msg
+		forwardMsg.Type = msgType
+		msgBytes, _ := json.Marshal(forwardMsg)
+
+		session.mu.RLock()
+		for _, receiver := range session.Receivers {
+			receiver.mu.Lock()
+			// We ignore write errors here to avoid blocking other receivers,
+			// but we could log them. The receiver cleanup loop or ping
+			// handler will eventually catch dead connections.
+			receiver.Conn.WriteMessage(websocket.TextMessage, msgBytes)
+			receiver.mu.Unlock()
+		}
+		session.mu.RUnlock()
 	}
 }
 
@@ -534,3 +436,4 @@ func generateJoinCode() string {
 	}
 	return code
 }
+
