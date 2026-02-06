@@ -12,6 +12,7 @@
     --accent-secondary: #60a5fa;
     --accent-success: #10b981;
     --accent-danger: #ef4444;
+    --accent-warning: #f59e0b;
     --text-primary: #f1f5f9;
     --text-secondary: #cbd5e1;
     --text-muted: #94a3b8;
@@ -342,7 +343,7 @@ input[type="file"] {
 
 .status-badge.warning {
     background: rgba(245, 158, 11, 0.2);
-    color: #f59e0b;
+    color: var(--accent-warning);
 }
 
 .receiver-count {
@@ -392,6 +393,11 @@ input[type="file"] {
 .log-entry.info {
     color: var(--accent-primary);
     border-left-color: var(--accent-primary);
+}
+
+.log-entry.warning {
+    color: var(--accent-warning);
+    border-left-color: var(--accent-warning);
 }
 
 .hidden {
@@ -487,7 +493,7 @@ input[type="file"] {
 }
 
 .text-char-count.warning {
-    color: #f59e0b;
+    color: var(--accent-warning);
 }
 
 .text-actions {
@@ -666,6 +672,10 @@ input[type="file"] {
 
 .notification.error {
     border-color: var(--accent-danger);
+}
+
+.notification.warning {
+    border-color: var(--accent-warning);
 }
 
 .notification-icon {

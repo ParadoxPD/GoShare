@@ -1,6 +1,7 @@
 // Configuration
-const CHUNK_SIZE = 64 * 1024; // 64KB safe chunk size
-const PARALLEL_CHUNKS = 4; // Slightly increased parallelism
+const CHUNK_SIZE = 64 * 1024; // 64KB
+const PARALLEL_CHUNKS = 8; // Increased for faster transfers
+const RECEIVER_BATCH_SIZE = 16; // NEW: Process more chunks in parallel when receiving
 let ENCRYPTION_KEY = "";
 
 // State
@@ -12,6 +13,19 @@ let receiverCount = 0;
 let fileStates = new Map();
 let messages = [];
 let currentTab = "files";
+let connectionID = null; // NEW: Unique connection identifier
+
+// NEW: Generate unique connection ID (persists in sessionStorage to prevent duplicate tabs)
+function getConnectionID() {
+  if (!connectionID) {
+    connectionID = sessionStorage.getItem("goshare_connection_id");
+    if (!connectionID) {
+      connectionID = `conn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      sessionStorage.setItem("goshare_connection_id", connectionID);
+    }
+  }
+  return connectionID;
+}
 
 // Initialize WebSocket connection
 function connectWebSocket() {
@@ -28,7 +42,6 @@ function connectWebSocket() {
     ws.onclose = () => {
       log("Disconnected from server", "error");
       updateConnectionStatus(false);
-      // Only reconnect if we were in a session
       if (sessionCode) {
         setTimeout(connectWebSocket, 3000);
       }
@@ -61,7 +74,6 @@ function updateConnectionStatus(connected) {
 function handleMessage(event) {
   try {
     const data = JSON.parse(event.data);
-    // Don't log every chunk to avoid console spam
     if (data.type !== "chunk") {
       log(`Received: ${data.type}`, "info");
     }
@@ -101,6 +113,9 @@ function handleMessage(event) {
       case "error":
         handleError(data);
         break;
+      case "warning":
+        handleWarning(data);
+        break;
       case "sender_disconnected":
         log("Sender disconnected", "error");
         showNotification("Sender disconnected", "error");
@@ -121,15 +136,11 @@ function log(message, type = "info") {
   const logContainer = document.querySelector(".log");
   if (logContainer) {
     logContainer.insertBefore(logEntry, logContainer.firstChild);
-    // Limit log entries
     if (logContainer.children.length > 50) {
       logContainer.removeChild(logContainer.lastChild);
     }
   }
 }
-
-// ... [startReceiving and startSending functions remain mostly the same] ...
-// Re-implementing startReceiving and startSending to ensure context is clear
 
 async function startReceiving() {
   currentMode = "receive";
@@ -158,7 +169,20 @@ async function startReceiving() {
         <div class="progress-container" id="progressContainer"></div>
       </div>
       <div id="messagesTab" class="tab-content">
-        <div class="messages-display" id="messagesDisplay"></div>
+        <h3>Send Message to Sender</h3>
+        <div class="text-message-container">
+          <div class="text-input-area">
+            <textarea class="text-input" id="textInput" placeholder="Type encrypted message..." maxlength="100000" oninput="updateCharCount()"></textarea>
+            <div class="text-input-controls">
+              <span class="text-char-count" id="charCount">0 / 100,000</span>
+              <div class="text-actions">
+                <button class="btn-icon" onclick="pasteText()"><span>📋</span><span>Paste</span></button>
+                <button class="btn" onclick="sendTextMessage()" id="sendTextBtn" disabled><span>📤</span><span>Send</span></button>
+              </div>
+            </div>
+          </div>
+          <div class="messages-display" id="messagesDisplay"><div class="empty-messages">No messages yet</div></div>
+        </div>
       </div>
     </div>
     <div class="card"><div class="log"></div></div>
@@ -300,7 +324,6 @@ async function startTransfer() {
 async function transferFile(file, fileId, fileIndex, totalFiles) {
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
-  // Create UI
   const progressItem = document.createElement("div");
   progressItem.className = "progress-item";
   progressItem.id = `progress_${fileId}`;
@@ -326,7 +349,6 @@ async function transferFile(file, fileId, fileIndex, totalFiles) {
     }),
   );
 
-  // Batch process chunks
   for (let i = 0; i < totalChunks; i += PARALLEL_CHUNKS) {
     const chunkPromises = [];
     for (let j = 0; j < PARALLEL_CHUNKS && i + j < totalChunks; j++) {
@@ -369,7 +391,6 @@ async function sendChunk(file, fileId, chunkIndex) {
     }),
   );
 
-  // Micro-task delay to keep UI responsive
   await new Promise((r) => setTimeout(r, 5));
 }
 
@@ -428,8 +449,9 @@ function handleMetadata(data) {
     name: data.name,
     size: data.size,
     totalChunks: data.totalChunks,
-    chunks: new Array(data.totalChunks), // Pre-allocate
+    chunks: new Array(data.totalChunks),
     receivedCount: 0,
+    pendingDecryption: [], // NEW: Queue for batch decryption
   });
 
   const progressItem = document.createElement("div");
@@ -450,8 +472,6 @@ function handleChunk(data) {
   const fileState = fileStates.get(data.fileId);
   if (!fileState) return;
 
-  // FIX: data.index might be 0, which is falsy, but Valid.
-  // The undefined check is safer.
   if (data.index === undefined || data.index === null) {
     console.warn("Received chunk with missing index", data);
     return;
@@ -464,6 +484,7 @@ function handleChunk(data) {
   updateProgress(data.fileId, progress);
 }
 
+// NEW: Optimized file processing with batch decryption
 async function handleFileDone(data) {
   const fileState = fileStates.get(data.fileId);
   if (!fileState) {
@@ -475,12 +496,29 @@ async function handleFileDone(data) {
   updateProgress(data.fileId, 100);
 
   try {
+    // Batch decrypt chunks for better performance
     const decryptedChunks = [];
-    for (let i = 0; i < fileState.chunks.length; i++) {
-      if (!fileState.chunks[i]) {
-        throw new Error(`Missing chunk ${i} for ${data.name}`);
+    const batchSize = RECEIVER_BATCH_SIZE;
+
+    for (let i = 0; i < fileState.chunks.length; i += batchSize) {
+      const batch = [];
+      for (let j = 0; j < batchSize && i + j < fileState.chunks.length; j++) {
+        const chunkIndex = i + j;
+        if (!fileState.chunks[chunkIndex]) {
+          throw new Error(`Missing chunk ${chunkIndex} for ${data.name}`);
+        }
+        batch.push(decryptChunk(fileState.chunks[chunkIndex]));
       }
-      decryptedChunks.push(await decryptChunk(fileState.chunks[i]));
+
+      const decryptedBatch = await Promise.all(batch);
+      decryptedChunks.push(...decryptedBatch);
+
+      // Update progress during decryption
+      const decryptProgress = ((i + batchSize) / fileState.chunks.length) * 100;
+      log(
+        `Decrypting ${data.name}: ${Math.min(Math.round(decryptProgress), 100)}%`,
+        "info",
+      );
     }
 
     const blob = new Blob(decryptedChunks);
@@ -494,7 +532,7 @@ async function handleFileDone(data) {
     URL.revokeObjectURL(url);
 
     log(`Downloaded: ${data.name}`, "success");
-    fileStates.delete(data.fileId); // Cleanup memory
+    fileStates.delete(data.fileId);
   } catch (error) {
     log(`Error: ${error.message}`, "error");
     alert(`Failed to save ${data.name}: ${error.message}`);
@@ -520,6 +558,14 @@ function handleCodeReceived(data) {
   log(`Session created: ${sessionCode}`, "success");
 }
 
+function handleJoined(data) {
+  log(`Successfully joined session: ${data.code}`, "success");
+  showNotification("Connected to sender!", "success");
+
+  // Enable send button for text messages
+  updateCharCount();
+}
+
 function handleSenderConnectedToReceiver() {
   log("Sender connected!", "success");
   const badge = document.querySelector(".qr-container .status-badge");
@@ -531,7 +577,12 @@ function handleSenderConnectedToReceiver() {
 
 function handleError(data) {
   log(data.error || "Error", "error");
-  alert(data.error);
+  showNotification(data.error || "Error occurred", "error");
+}
+
+function handleWarning(data) {
+  log(data.error || "Warning", "warning");
+  showNotification(data.error || "Warning", "warning");
 }
 
 function switchTab(name, btn) {
@@ -567,7 +618,6 @@ function base64ToArrayBuffer(base64) {
 }
 
 // --- Text Messaging ---
-// (Kept largely the same, just ensuring encryption helpers are used correctly)
 function updateCharCount() {
   const input = document.getElementById("textInput");
   const countDisplay = document.getElementById("charCount");
@@ -595,7 +645,7 @@ async function sendTextMessage() {
   const text = document.getElementById("textInput").value.trim();
   if (!text || !sessionCode) return;
   try {
-    const encrypted = await encryptText(text); // Uses AES-GCM
+    const encrypted = await encryptText(text);
     const msgId = `msg_${Date.now()}`;
     ws.send(
       JSON.stringify({
@@ -603,12 +653,20 @@ async function sendTextMessage() {
         code: sessionCode,
         text: encrypted,
         messageId: msgId,
+        senderName: currentMode === "send" ? "Sender" : "Receiver", // NEW: Identify sender
       }),
     );
-    messages.push({ id: msgId, text: text, timestamp: Date.now(), sent: true });
+    messages.push({
+      id: msgId,
+      text: text,
+      timestamp: Date.now(),
+      sent: true,
+      senderName: currentMode === "send" ? "You" : "You",
+    });
     updateMessagesDisplay();
     document.getElementById("textInput").value = "";
     updateCharCount();
+    log("Message sent", "success");
   } catch (e) {
     log("Send error", "error");
   }
@@ -622,6 +680,7 @@ async function handleTextMessage(data) {
       text: text,
       timestamp: data.timestamp * 1000,
       sent: false,
+      senderName: data.senderName || "Other",
     });
     updateMessagesDisplay();
     showNotification("New message received", "success");
@@ -631,7 +690,23 @@ async function handleTextMessage(data) {
 }
 
 function handleTextAck(data) {
-  log(`Message delivered to ${data.receivers} devices`, "success");
+  log(`Message delivered to ${data.receivers} device(s)`, "success");
+}
+
+// NEW: Copy text to clipboard
+async function copyMessageText(text, buttonElement) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const originalHTML = buttonElement.innerHTML;
+    buttonElement.innerHTML = "<span>✓</span><span>Copied!</span>";
+    buttonElement.classList.add("copied");
+    setTimeout(() => {
+      buttonElement.innerHTML = originalHTML;
+      buttonElement.classList.remove("copied");
+    }, 2000);
+  } catch (e) {
+    showNotification("Failed to copy", "error");
+  }
 }
 
 function updateMessagesDisplay() {
@@ -643,20 +718,28 @@ function updateMessagesDisplay() {
   }
   display.innerHTML = messages
     .map(
-      (msg) => `
+      (msg, index) => `
         <div class="message-item ${msg.sent ? "sent" : ""}">
             <div class="message-header">
-                <span class="message-type">${msg.sent ? "Sent" : "Received"}</span>
+                <span class="message-type">${msg.sent ? "You" : msg.senderName}</span>
                 <span class="message-time">${new Date(msg.timestamp).toLocaleString()}</span>
             </div>
             <div class="message-content">${escapeHtml(msg.text)}</div>
+            ${
+              !msg.sent
+                ? `<div class="message-actions">
+                <button class="btn-icon" onclick="copyMessageText(\`${escapeHtml(msg.text).replace(/`/g, "\\`")}\`, this)">
+                    <span>📋</span><span>Copy</span>
+                </button>
+            </div>`
+                : ""
+            }
         </div>`,
     )
     .reverse()
     .join("");
 }
 
-// AES-GCM for text
 async function encryptText(text) {
   const encoder = new TextEncoder();
   const data = encoder.encode(text);
@@ -713,7 +796,6 @@ function escapeHtml(text) {
 }
 
 window.onload = async () => {
-  // --- ADD THIS BLOCK ---
   if (!window.crypto || !window.crypto.subtle) {
     const errorMsg =
       "⚠️ Critical Error: Web Crypto API is missing.\n\n" +
@@ -724,11 +806,13 @@ window.onload = async () => {
     document.body.innerHTML = `<div style="padding:2rem; color:white; text-align:center;">${errorMsg.replace(/\n/g, "<br>")}</div>`;
     return;
   }
-  // ---------------------
 
   const res = await fetch("/config");
   const cfg = await res.json();
   ENCRYPTION_KEY = cfg.key;
+
+  // Initialize connection ID
+  getConnectionID();
 
   await connectWebSocket();
 };
@@ -746,7 +830,13 @@ function joinSession() {
   const code = document.getElementById("codeInput").value.trim();
   if (code.length === 6) {
     sessionCode = code;
-    ws.send(JSON.stringify({ type: "join", code }));
+    ws.send(
+      JSON.stringify({
+        type: "join",
+        code,
+        receiverId: getConnectionID(), // NEW: Send connection ID to prevent duplicates
+      }),
+    );
   } else {
     alert("Invalid code");
   }

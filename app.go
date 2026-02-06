@@ -31,36 +31,39 @@ type Message struct {
 	Code        string `json:"code,omitempty"`
 	Name        string `json:"name,omitempty"`
 	Size        int64  `json:"size,omitempty"`
-	TotalChunks int    `json:"totalChunks"` // Removed omitempty
-	Index       int    `json:"index"`       // Removed omitempty (Fixes missing chunk 0)
+	TotalChunks int    `json:"totalChunks"`
+	Index       int    `json:"index"`
 	Content     string `json:"content,omitempty"`
 	Error       string `json:"error,omitempty"`
 	ReceiverID  string `json:"receiverId,omitempty"`
 	FileID      string `json:"fileId,omitempty"`
-	FileIndex   int    `json:"fileIndex"`  // Removed omitempty
-	TotalFiles  int    `json:"totalFiles"` // Removed omitempty
-	Receivers   int    `json:"receivers"`  // Removed omitempty
+	FileIndex   int    `json:"fileIndex"`
+	TotalFiles  int    `json:"totalFiles"`
+	Receivers   int    `json:"receivers"`
 	Text        string `json:"text,omitempty"`
 	MessageID   string `json:"messageId,omitempty"`
 	Timestamp   int64  `json:"timestamp,omitempty"`
+	SenderName  string `json:"senderName,omitempty"`
 }
 
 // Receiver represents a connected receiver client
 type Receiver struct {
-	Conn     *websocket.Conn
-	ID       string
-	JoinedAt time.Time
-	mu       sync.Mutex
+	Conn         *websocket.Conn
+	ID           string
+	ConnectionID string // NEW: Unique connection identifier
+	JoinedAt     time.Time
+	mu           sync.Mutex
 }
 
 // Session represents a file sharing session
 type Session struct {
-	Code         string
-	Sender       *websocket.Conn
-	Receivers    map[string]*Receiver
-	CreatedAt    time.Time
-	LastActivity time.Time
-	mu           sync.RWMutex
+	Code          string
+	Sender        *websocket.Conn
+	Receivers     map[string]*Receiver
+	ConnectionIDs map[string]bool // NEW: Track unique connection IDs
+	CreatedAt     time.Time
+	LastActivity  time.Time
+	mu            sync.RWMutex
 }
 
 var upgrader = websocket.Upgrader{
@@ -80,7 +83,6 @@ var (
 func main() {
 	godotenv.Load()
 
-	// Default encryption key warning
 	if os.Getenv("GOSHARE_ENCRYPTION_KEY") == "" {
 		log.Println("WARNING: GOSHARE_ENCRYPTION_KEY is not set. Using default insecure key.")
 		os.Setenv("GOSHARE_ENCRYPTION_KEY", "default-insecure-key-123")
@@ -89,14 +91,12 @@ func main() {
 	hotpSecretRaw := os.Getenv("GOSHARE_HOTP_SECRET")
 	if hotpSecretRaw == "" {
 		log.Println("WARNING: GOSHARE_HOTP_SECRET is not set. Using default insecure key.")
-		hotpSecretRaw = "defaultsecret" // Fallback
+		hotpSecretRaw = "defaultsecret"
 	}
 	hotpSecret = base32.StdEncoding.EncodeToString([]byte(hotpSecretRaw))
 
-	// Start session cleanup routine
 	go cleanupExpiredSessions()
 
-	// Set up HTTP server
 	http.Handle("/", http.FileServer(http.Dir("./public")))
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/health", healthCheck)
@@ -163,9 +163,9 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	var sessionCode string
 	var receiverID string
+	var connectionID string // NEW: Track connection ID
 	var isSender bool
 
-	// Start ping routine
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(PingInterval)
@@ -184,7 +184,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		close(done)
-		// Cleanup on disconnect
 		if sessionCode != "" {
 			sessionsLock.RLock()
 			session, exists := sessions[sessionCode]
@@ -193,12 +192,14 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if exists {
 				session.mu.Lock()
 				if receiverID != "" {
-					// Remove receiver
 					delete(session.Receivers, receiverID)
+					// NEW: Remove connection ID tracking
+					if connectionID != "" {
+						delete(session.ConnectionIDs, connectionID)
+					}
 					receiverCount := len(session.Receivers)
 					log.Printf("Receiver %s disconnected from session %s (%d remaining)", receiverID, sessionCode, receiverCount)
 
-					// Notify sender about receiver count
 					if session.Sender != nil {
 						notifyMsg := Message{
 							Type:      "receiver_count",
@@ -208,9 +209,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 						session.Sender.WriteMessage(websocket.TextMessage, msgBytes)
 					}
 				} else if isSender {
-					// Sender disconnected, notify all receivers
 					log.Printf("Sender disconnected from session %s", sessionCode)
-					session.Sender = nil // Mark sender as gone
+					session.Sender = nil
 					for _, receiver := range session.Receivers {
 						disconnectMsg := Message{Type: "sender_disconnected"}
 						msgBytes, _ := json.Marshal(disconnectMsg)
@@ -219,7 +219,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 				session.mu.Unlock()
 
-				// If no receivers left and sender gone, clean up session
 				session.mu.RLock()
 				shouldDelete := len(session.Receivers) == 0 && session.Sender == nil
 				session.mu.RUnlock()
@@ -262,11 +261,12 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			isSender = true
 
 			session := &Session{
-				Code:         code,
-				Receivers:    make(map[string]*Receiver),
-				CreatedAt:    time.Now(),
-				LastActivity: time.Now(),
-				Sender:       conn,
+				Code:          code,
+				Receivers:     make(map[string]*Receiver),
+				ConnectionIDs: make(map[string]bool), // NEW
+				CreatedAt:     time.Now(),
+				LastActivity:  time.Now(),
+				Sender:        conn,
 			}
 
 			sessionsLock.Lock()
@@ -286,6 +286,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			code := msg.Code
 			sessionCode = code
 			receiverID = uuid.New().String()
+			connectionID = msg.ReceiverID // NEW: Use client-provided connection ID
 
 			sessionsLock.RLock()
 			session, exists := sessions[code]
@@ -295,10 +296,21 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				errorMsg := Message{Type: "error", Error: "Invalid code"}
 				errorBytes, _ := json.Marshal(errorMsg)
 				conn.WriteMessage(websocket.TextMessage, errorBytes)
-				return // Disconnect
+				return
 			}
 
 			session.mu.Lock()
+
+			// NEW: Check if this connection ID already exists
+			if session.ConnectionIDs[connectionID] {
+				session.mu.Unlock()
+				warningMsg := Message{Type: "warning", Error: "You are already connected to this session"}
+				warningBytes, _ := json.Marshal(warningMsg)
+				conn.WriteMessage(websocket.TextMessage, warningBytes)
+				// Don't return - let the connection stay open but don't join again
+				continue
+			}
+
 			if len(session.Receivers) >= MaxReceivers {
 				session.mu.Unlock()
 				errorMsg := Message{Type: "error", Error: "Session is full"}
@@ -308,16 +320,18 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 			receiver := &Receiver{
-				Conn:     conn,
-				ID:       receiverID,
-				JoinedAt: time.Now(),
+				Conn:         conn,
+				ID:           receiverID,
+				ConnectionID: connectionID, // NEW
+				JoinedAt:     time.Now(),
 			}
 			session.Receivers[receiverID] = receiver
+			session.ConnectionIDs[connectionID] = true // NEW: Track this connection
 			receiverCount := len(session.Receivers)
 			session.LastActivity = time.Now()
 			session.mu.Unlock()
 
-			log.Printf("Receiver %s joined session %s (%d total)", receiverID, code, receiverCount)
+			log.Printf("Receiver %s (conn: %s) joined session %s (%d total)", receiverID, connectionID, code, receiverCount)
 
 			joinedMsg := Message{
 				Type:       "joined",
@@ -351,7 +365,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			broadcastToReceivers(msg, "all_done")
 
 		case "text_message":
-			// Forward encrypted text message to all receivers
+			// NEW: Support bidirectional messaging
 			sessionsLock.RLock()
 			session, exists := sessions[msg.Code]
 			sessionsLock.RUnlock()
@@ -362,23 +376,37 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				session.mu.Unlock()
 
 				textMsg := Message{
-					Type:      "text_message",
-					Text:      msg.Text,
-					MessageID: msg.MessageID,
-					Timestamp: time.Now().Unix(),
+					Type:       "text_message",
+					Text:       msg.Text,
+					MessageID:  msg.MessageID,
+					Timestamp:  time.Now().Unix(),
+					SenderName: msg.SenderName, // NEW: Include sender identifier
 				}
 				textMsgBytes, _ := json.Marshal(textMsg)
 
 				session.mu.RLock()
 				receiverCount := 0
-				for _, receiver := range session.Receivers {
-					receiver.mu.Lock()
-					if err := receiver.Conn.WriteMessage(websocket.TextMessage, textMsgBytes); err == nil {
-						receiverCount++
-					} else {
-						log.Printf("Error sending text to receiver %s: %v", receiver.ID, err)
+
+				// If sender is sending, broadcast to all receivers
+				if isSender {
+					for _, receiver := range session.Receivers {
+						receiver.mu.Lock()
+						if err := receiver.Conn.WriteMessage(websocket.TextMessage, textMsgBytes); err == nil {
+							receiverCount++
+						} else {
+							log.Printf("Error sending text to receiver %s: %v", receiver.ID, err)
+						}
+						receiver.mu.Unlock()
 					}
-					receiver.mu.Unlock()
+				} else {
+					// NEW: If receiver is sending, send to sender
+					if session.Sender != nil {
+						if err := session.Sender.WriteMessage(websocket.TextMessage, textMsgBytes); err == nil {
+							receiverCount = 1
+						} else {
+							log.Printf("Error sending text to sender: %v", err)
+						}
+					}
 				}
 				session.mu.RUnlock()
 
@@ -394,7 +422,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Helper to reduce code duplication and handle broadcast errors
 func broadcastToReceivers(msg Message, msgType string) {
 	sessionsLock.RLock()
 	session, exists := sessions[msg.Code]
@@ -405,7 +432,6 @@ func broadcastToReceivers(msg Message, msgType string) {
 		session.LastActivity = time.Now()
 		session.mu.Unlock()
 
-		// Construct message to forward (stripping some internal fields if needed)
 		forwardMsg := msg
 		forwardMsg.Type = msgType
 		msgBytes, _ := json.Marshal(forwardMsg)
@@ -413,9 +439,6 @@ func broadcastToReceivers(msg Message, msgType string) {
 		session.mu.RLock()
 		for _, receiver := range session.Receivers {
 			receiver.mu.Lock()
-			// We ignore write errors here to avoid blocking other receivers,
-			// but we could log them. The receiver cleanup loop or ping
-			// handler will eventually catch dead connections.
 			receiver.Conn.WriteMessage(websocket.TextMessage, msgBytes)
 			receiver.mu.Unlock()
 		}
