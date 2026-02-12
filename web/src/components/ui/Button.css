@@ -1,0 +1,148 @@
+.btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    font-family: var(--font-sans);
+    font-weight: 600;
+    border: none;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: all var(--transition-base);
+    overflow: hidden;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.btn::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg,
+            transparent,
+            rgba(255, 255, 255, 0.1),
+            transparent);
+    transition: left 0.5s;
+}
+
+.btn:hover::before {
+    left: 100%;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn:disabled::before {
+    display: none;
+}
+
+/* Sizes */
+.btn-sm {
+    padding: var(--space-2) var(--space-4);
+    font-size: 0.875rem;
+    height: 36px;
+}
+
+.btn-md {
+    padding: var(--space-3) var(--space-6);
+    font-size: 1rem;
+    height: 44px;
+}
+
+.btn-lg {
+    padding: var(--space-4) var(--space-8);
+    font-size: 1.125rem;
+    height: 52px;
+}
+
+/* Variants */
+.btn-primary {
+    background: var(--gradient-primary);
+    color: white;
+    box-shadow: var(--shadow-glow);
+}
+
+.btn-primary:hover:not(:disabled) {
+    box-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
+    transform: translateY(-2px);
+}
+
+.btn-primary:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.btn-secondary {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--text-tertiary);
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.2);
+}
+
+.btn-ghost {
+    background: transparent;
+    color: var(--text-secondary);
+}
+
+.btn-ghost:hover:not(:disabled) {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+}
+
+.btn-danger {
+    background: var(--gradient-error);
+    color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+    transform: translateY(-2px);
+}
+
+/* Full width */
+.btn-full {
+    width: 100%;
+}
+
+/* Loading state */
+.btn-loading {
+    pointer-events: none;
+}
+
+.btn-spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.animate-spin {
+    animation: spin 1s linear infinite;
+}
+
+/* Icon */
+.btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25em;
+}
+
+.btn-text {
+    display: inline-block;
+}

@@ -1,0 +1,144 @@
+.progress-bar-container {
+    background: var(--bg-elevated);
+    border: 1px solid rgba(156, 163, 175, 0.1);
+    border-radius: var(--radius-md);
+    padding: var(--space-4);
+    animation: fadeIn 0.3s ease-out;
+}
+
+.status-transferring {
+    border-color: rgba(0, 212, 255, 0.3);
+}
+
+.status-complete {
+    border-color: rgba(16, 185, 129, 0.3);
+}
+
+.status-error {
+    border-color: rgba(239, 68, 68, 0.3);
+}
+
+.progress-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    margin-bottom: var(--space-3);
+}
+
+.progress-info {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex: 1;
+    min-width: 0;
+}
+
+.progress-icon {
+    font-size: 1.25rem;
+    flex-shrink: 0;
+}
+
+.status-transferring .progress-icon {
+    animation: pulse 2s ease-in-out infinite;
+}
+
+.progress-filename {
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.progress-stats {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.progress-percentage {
+    font-size: 0.875rem;
+    color: var(--accent-primary);
+    font-weight: 600;
+    min-width: 45px;
+    text-align: right;
+}
+
+.status-complete .progress-percentage {
+    color: var(--accent-success);
+}
+
+.progress-track {
+    position: relative;
+    height: 8px;
+    background: rgba(156, 163, 175, 0.1);
+    border-radius: 999px;
+    overflow: hidden;
+    margin-bottom: var(--space-3);
+}
+
+.progress-fill {
+    position: relative;
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease-out;
+    overflow: hidden;
+}
+
+.progress-shimmer {
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg,
+            transparent,
+            rgba(255, 255, 255, 0.3),
+            transparent);
+    animation: shimmer 2s infinite;
+}
+
+@keyframes shimmer {
+    to {
+        left: 100%;
+    }
+}
+
+.progress-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.progress-size {
+    display: flex;
+    align-items: center;
+}
+
+.progress-speed {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--accent-primary);
+}
+
+.progress-eta {
+    font-size: 0.75rem;
+}
+
+.progress-error {
+    color: var(--accent-error);
+    font-size: 0.75rem;
+}
+
+@media (max-width: 768px) {
+    .progress-footer {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-2);
+    }
+}

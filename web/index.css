@@ -1,0 +1,332 @@
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap');
+
+:root {
+    /* Cyberpunk Color Palette */
+    --cyber-bg: #0a0e27;
+    --cyber-bg-elevated: #111530;
+    --cyber-bg-card: #151937;
+    --cyber-surface: #1a1f3a;
+
+    /* Neon Accents */
+    --neon-cyan: #00f0ff;
+    --neon-magenta: #ff00ff;
+    --neon-yellow: #ffff00;
+    --neon-blue: #0066ff;
+    --neon-green: #00ff88;
+    --neon-purple: #b300ff;
+
+    /* Semantic Colors */
+    --primary: var(--neon-cyan);
+    --secondary: var(--neon-magenta);
+    --accent: var(--neon-purple);
+    --success: var(--neon-green);
+    --warning: var(--neon-yellow);
+    --error: #ff0055;
+
+    /* Text */
+    --text-primary: #ffffff;
+    --text-secondary: #a8b2d1;
+    --text-muted: #6b7694;
+
+    /* Borders & Overlays */
+    --border-color: rgba(0, 240, 255, 0.3);
+    --border-glow: rgba(0, 240, 255, 0.5);
+    --overlay: rgba(10, 14, 39, 0.85);
+
+    /* Shadows & Glows */
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
+    --glow-cyan: 0 0 20px rgba(0, 240, 255, 0.5);
+    --glow-magenta: 0 0 20px rgba(255, 0, 255, 0.5);
+    --glow-purple: 0 0 20px rgba(179, 0, 255, 0.5);
+
+    /* Typography */
+    --font-display: 'Orbitron', monospace;
+    --font-body: 'Rajdhani', sans-serif;
+
+    /* Spacing */
+    --spacing-xs: 0.25rem;
+    --spacing-sm: 0.5rem;
+    --spacing-md: 1rem;
+    --spacing-lg: 1.5rem;
+    --spacing-xl: 2rem;
+    --spacing-2xl: 3rem;
+
+    /* Border Radius */
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+
+    /* Animations */
+    --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-slow: 350ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    overflow-x: hidden;
+}
+
+body {
+    font-family: var(--font-body);
+    font-weight: 400;
+    font-size: 16px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background: var(--cyber-bg);
+    position: relative;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Cyberpunk Grid Background */
+body::before {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-image:
+        linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+    background-size: 50px 50px;
+    pointer-events: none;
+    z-index: -1;
+}
+
+/* Animated scanlines */
+body::after {
+    content: '';
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(to bottom,
+            transparent 50%,
+            rgba(0, 240, 255, 0.02) 50%);
+    background-size: 100% 4px;
+    pointer-events: none;
+    z-index: -1;
+    animation: scanlines 10s linear infinite;
+}
+
+@keyframes scanlines {
+    0% {
+        transform: translateY(0);
+    }
+
+    100% {
+        transform: translateY(4px);
+    }
+}
+
+#root {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+h1 {
+    font-size: 2.5rem;
+    font-weight: 900;
+}
+
+h2 {
+    font-size: 2rem;
+}
+
+h3 {
+    font-size: 1.5rem;
+}
+
+button {
+    font-family: var(--font-body);
+    cursor: pointer;
+    border: none;
+    outline: none;
+}
+
+input,
+textarea,
+select {
+    font-family: var(--font-body);
+    outline: none;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--cyber-bg-card);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--neon-cyan);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--glow-cyan);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--neon-magenta);
+    box-shadow: var(--glow-magenta);
+}
+
+/* Selection */
+::selection {
+    background: var(--neon-cyan);
+    color: var(--cyber-bg);
+}
+
+/* Utilities */
+.text-primary {
+    color: var(--text-primary);
+}
+
+.text-secondary {
+    color: var(--text-secondary);
+}
+
+.text-muted {
+    color: var(--text-muted);
+}
+
+.bg-card {
+    background: var(--cyber-bg-card);
+}
+
+.bg-elevated {
+    background: var(--cyber-bg-elevated);
+}
+
+.bg-surface {
+    background: var(--cyber-surface);
+}
+
+/* Glow Effects */
+.glow-cyan {
+    box-shadow: var(--glow-cyan);
+}
+
+.glow-magenta {
+    box-shadow: var(--glow-magenta);
+}
+
+.glow-purple {
+    box-shadow: var(--glow-purple);
+}
+
+/* Animations */
+@keyframes pulse-glow {
+
+    0%,
+    100% {
+        box-shadow: 0 0 20px rgba(0, 240, 255, 0.5);
+    }
+
+    50% {
+        box-shadow: 0 0 40px rgba(0, 240, 255, 0.8);
+    }
+}
+
+@keyframes slide-in-up {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes fade-in {
+    from {
+        opacity: 0;
+    }
+
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes glitch {
+    0% {
+        transform: translate(0);
+    }
+
+    20% {
+        transform: translate(-2px, 2px);
+    }
+
+    40% {
+        transform: translate(-2px, -2px);
+    }
+
+    60% {
+        transform: translate(2px, 2px);
+    }
+
+    80% {
+        transform: translate(2px, -2px);
+    }
+
+    100% {
+        transform: translate(0);
+    }
+}
+
+.animate-slide-in {
+    animation: slide-in-up 0.4s ease-out;
+}
+
+.animate-fade-in {
+    animation: fade-in 0.3s ease-out;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+    h1 {
+        font-size: 2rem;
+    }
+
+    h2 {
+        font-size: 1.5rem;
+    }
+
+    h3 {
+        font-size: 1.25rem;
+    }
+
+    body::before {
+        background-size: 30px 30px;
+    }
+}
