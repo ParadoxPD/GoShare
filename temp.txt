@@ -1,0 +1,766 @@
+package main
+
+import (
+	"GoShare/internal/config"
+	"GoShare/internal/server"
+	"fmt"
+	"log"
+	"net/http"
+)
+
+func main() {
+	cfg := config.Load()
+
+	s := server.New(cfg)
+
+	addr := ":" + cfg.Port
+	fmt.Println("🚀 Server running on", addr)
+
+	log.Fatal(http.ListenAndServe(addr, s.Router()))
+}
+package config
+
+import (
+	"encoding/base64"
+	"log"
+	"os"
+	"strconv"
+	"time"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	EncryptionKey  []byte
+	HOTPSecret     []byte
+	MaxReceivers   int
+	SessionTimeout time.Duration
+	Port           string
+}
+
+func Load() *Config {
+	_ = godotenv.Load()
+
+	cfg := &Config{
+		EncryptionKey:  mustDecode("GOSHARE_ENCRYPTION_KEY", 16),
+		HOTPSecret:     mustDecode("GOSHARE_HOTP_SECRET", 32),
+		MaxReceivers:   mustInt("GOSHARE_MAX_RECEIVERS", 10),
+		SessionTimeout: mustDuration("GOSHARE_SESSION_TIMEOUT", 30*time.Minute),
+		Port:           mustString("PORT", "4000"),
+	}
+
+	return cfg
+}
+
+func mustDecode(env string, expected int) []byte {
+	val := mustString(env, "")
+	data, err := base64.StdEncoding.DecodeString(val)
+	if err != nil {
+		log.Fatalf("%s must be base64: %v", env, err)
+	}
+	if len(data) != expected {
+		log.Fatalf("%s must be %d bytes, got %d", env, expected, len(data))
+	}
+	return data
+}
+
+func mustInt(env string, def int) int {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil {
+		log.Fatalf("%s must be int", env)
+	}
+	return i
+}
+
+func mustDuration(env string, def time.Duration) time.Duration {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		log.Fatalf("%s invalid duration", env)
+	}
+	return d
+}
+
+func mustString(env, def string) string {
+	val := os.Getenv(env)
+	if val == "" {
+		if def == "" {
+			log.Fatalf("%s is required", env)
+		}
+		return def
+	}
+	return val
+}
+package protocol
+
+import "encoding/json"
+
+type Message struct {
+	Type string `json:"type"`
+
+	Code string `json:"code,omitempty"`
+
+	// identity
+	FromID     string `json:"fromId,omitempty"`
+	TargetID   string `json:"targetId,omitempty"`
+	ReceiverID string `json:"receiverId,omitempty"`
+
+	// chat
+	Text       string `json:"text,omitempty"`
+	MessageID  string `json:"messageId,omitempty"`
+	Timestamp  int64  `json:"timestamp,omitempty"`
+	SenderName string `json:"senderName,omitempty"`
+
+	// webrtc
+	Signal json.RawMessage `json:"signal,omitempty"`
+
+	// misc
+	Error string `json:"error,omitempty"`
+}
+package server
+
+import (
+	"GoShare/internal/config"
+	"GoShare/internal/protocol"
+	"GoShare/internal/session"
+	"GoShare/internal/util"
+	"GoShare/internal/ws"
+	"encoding/base64"
+	"encoding/json"
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
+)
+
+type Server struct {
+	sessions *session.Manager
+	upgrader websocket.Upgrader
+	cfg      *config.Config
+}
+
+func New(cfg *config.Config) *Server {
+	return &Server{
+		sessions: session.NewManager(),
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+		cfg: cfg,
+	}
+}
+
+func (s *Server) Router() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", s.handleWS)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
+	return mux
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	done := make(chan struct{})
+	ws.StartHeartbeat(conn, done)
+
+	defer func() {
+		close(done)
+		conn.Close()
+	}()
+
+	peer := &session.Peer{
+		ID:   uuid.New().String(),
+		Conn: conn,
+	}
+
+	var currentSession *session.Session
+	var isSender bool
+	var writeMu sync.Mutex
+
+	for {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("read error:", err)
+			return
+		}
+
+		var msg protocol.Message
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+
+		switch msg.Type {
+
+		// ─────────────────────────────
+		// CREATE SESSION (sender)
+		// ─────────────────────────────
+		case "create_session":
+			code := util.GenerateCode(base64.StdEncoding.EncodeToString(s.cfg.HOTPSecret))
+			currentSession = s.sessions.Create(code, peer)
+			isSender = true
+
+			resp := protocol.Message{
+				Type:   "code",
+				Code:   code,
+				FromID: peer.ID,
+			}
+			bytes, _ := json.Marshal(resp)
+			ws.SafeWrite(conn, &writeMu, bytes)
+
+		// ─────────────────────────────
+		// JOIN SESSION (receiver)
+		// ─────────────────────────────
+		case "join":
+			sess, ok := s.sessions.Get(msg.Code)
+			if !ok {
+				ws.SafeWrite(conn, &writeMu, mustJSON(protocol.Message{
+					Type:  "error",
+					Error: "invalid code",
+				}))
+				continue
+			}
+
+			sess.AddReceiver(peer)
+			currentSession = sess
+
+			ws.SafeWrite(conn, &writeMu, mustJSON(protocol.Message{
+				Type:       "joined",
+				Code:       msg.Code,
+				ReceiverID: peer.ID,
+				FromID:     sess.Sender.ID,
+			}))
+
+			sess.NotifySenderReceiverJoined(peer.ID)
+
+		// ─────────────────────────────
+		// WEBRTC SIGNAL RELAY
+		// ─────────────────────────────
+		case "webrtc_signal":
+			if currentSession != nil {
+				currentSession.RouteSignal(msg)
+			}
+
+			// ─────────────────────────────
+			// TEXT CHAT RELAY
+			// ─────────────────────────────
+		case "text_message":
+			if currentSession == nil {
+				continue
+			}
+
+			msg.Timestamp = time.Now().Unix()
+			bytes := mustJSON(msg)
+
+			if isSender {
+				currentSession.RelayTextFromSender(bytes)
+			} else {
+				currentSession.RelayTextToSender(bytes)
+			}
+		}
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+package session
+
+import (
+	"GoShare/internal/protocol"
+	"encoding/json"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+type Peer struct {
+	ID   string
+	Conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (p *Peer) Send(b []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.Conn.WriteMessage(1, b)
+}
+
+type Session struct {
+	Code         string
+	Sender       *Peer
+	Receivers    map[string]*Peer
+	LastActivity time.Time
+	mu           sync.RWMutex
+}
+
+type Manager struct {
+	sessions map[string]*Session
+	mu       sync.RWMutex
+}
+
+func NewManager() *Manager {
+	return &Manager{
+		sessions: make(map[string]*Session),
+	}
+}
+
+func (m *Manager) Create(code string, sender *Peer) *Session {
+	s := &Session{
+		Code:         code,
+		Sender:       sender,
+		Receivers:    make(map[string]*Peer),
+		LastActivity: time.Now(),
+	}
+	m.mu.Lock()
+	m.sessions[code] = s
+	m.mu.Unlock()
+	return s
+}
+
+func (m *Manager) Get(code string) (*Session, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s, ok := m.sessions[code]
+	return s, ok
+}
+
+func (m *Manager) Delete(code string) {
+	m.mu.Lock()
+	delete(m.sessions, code)
+	m.mu.Unlock()
+}
+
+func (s *Session) RouteSignal(msg protocol.Message) {
+	bytes, _ := json.Marshal(msg)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// To sender
+	if s.Sender != nil && msg.TargetID == s.Sender.ID {
+		s.Sender.mu.Lock()
+		s.Sender.Conn.WriteMessage(1, bytes)
+		s.Sender.mu.Unlock()
+		return
+	}
+
+	// To receiver
+	if peer, ok := s.Receivers[msg.TargetID]; ok {
+		peer.mu.Lock()
+		peer.Conn.WriteMessage(1, bytes)
+		peer.mu.Unlock()
+	}
+}
+
+func (s *Session) AddReceiver(p *Peer) {
+	s.mu.Lock()
+	s.Receivers[p.ID] = p
+	s.LastActivity = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *Session) NotifySenderReceiverJoined(id string) {
+	msg, _ := json.Marshal(map[string]any{
+		"type":     "receiver_joined",
+		"targetId": id,
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Sender != nil {
+		s.Sender.Send(msg)
+	}
+}
+
+func (s *Session) RelayTextFromSender(b []byte) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.Receivers {
+		r.Send(b)
+	}
+}
+
+func (s *Session) RelayTextToSender(b []byte) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Sender != nil {
+		s.Sender.Send(b)
+	}
+}
+package util
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/pquerna/otp/hotp"
+)
+
+var counter uint64 = uint64(time.Now().Unix())
+
+func GenerateCode(secret string) string {
+	counter++
+	code, err := hotp.GenerateCode(secret, counter)
+	if err != nil {
+		return fmt.Sprintf("%06d", time.Now().Unix()%1000000)
+	}
+	return code
+}
+package ws
+
+import (
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+)
+
+const (
+	WriteTimeout = 10 * time.Second
+	PingInterval = 20 * time.Second
+)
+
+func StartHeartbeat(conn *websocket.Conn, done chan struct{}) {
+	ticker := time.NewTicker(PingInterval)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(WriteTimeout))
+			case <-done:
+				ticker.Stop()
+				return
+			}
+		}
+	}()
+}
+
+func SafeWrite(conn *websocket.Conn, mu *sync.Mutex, msg []byte) error {
+	mu.Lock()
+	defer mu.Unlock()
+	conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	return conn.WriteMessage(websocket.TextMessage, msg)
+}
+
+
+
+You’re building **exactly** the kind of system where 90% of failures are *not* crypto or WebRTC…
+they’re **network weirdness, partial state, and peers disappearing mid-transfer**.
+
+P2P + WebRTC + chunked AES is great.
+Now you need the **“internet is hostile and unreliable” layer** on top.
+
+Here’s the battle-tested blueprint used by serious P2P systems (Syncthing, Resilio, BitTorrent, Wormhole-style tools).
+
+---
+
+## 🧠 1) Split the problem into 4 independent layers
+
+```
+Transport (WebRTC DataChannel)
+Session (peer identity, reconnect, resume)
+Transfer (chunks, ordering, integrity, resume)
+Crypto (AES, keys, verification)
+```
+
+If you mix these → impossible to recover from errors.
+
+---
+
+## 🌐 2) Use WebRTC DataChannel the *right* way
+
+Create **two channels**:
+
+| Channel   | Mode                  | Purpose                            |
+| --------- | --------------------- | ---------------------------------- |
+| `control` | reliable, ordered     | metadata, ACKs, resume, heartbeats |
+| `data`    | unreliable, unordered | raw file chunks                    |
+
+Why?
+
+* Reliable channel for tiny messages
+* Unreliable for speed (no head-of-line blocking)
+* You re-implement reliability **at chunk layer**, not transport
+
+This is exactly how BitTorrent/QUIC style systems work.
+
+---
+
+## 🧩 3) Every file becomes a “transfer session”
+
+Before sending data:
+
+**Sender → control**
+
+```json
+{
+  "type": "file_offer",
+  "file_id": "uuid",
+  "name": "video.mp4",
+  "size": 734003200,
+  "chunk_size": 65536,
+  "total_chunks": 11200,
+  "file_sha256": "..."
+}
+```
+
+Receiver replies:
+
+```json
+{
+  "type": "file_accept",
+  "file_id": "...",
+  "have_chunks": [0,1,2,5,6,7]  // resume support
+}
+```
+
+Now sender **only sends missing chunks**.
+
+---
+
+## 🧱 4) Chunk format (critical)
+
+Each chunk must carry its own metadata:
+
+```
+| file_id (16B) | chunk_index (4B) | nonce (12B) | ciphertext | auth_tag (16B) |
+```
+
+AES-GCM per chunk.
+
+Why per chunk?
+
+* Lost chunk does NOT corrupt stream
+* Receiver can decrypt independently
+* Resume is trivial
+* No stream state to rebuild
+
+---
+
+## 🧮 5) Receiver keeps a chunk bitmap
+
+For each file:
+
+```
+bitset[total_chunks]
+```
+
+When a chunk arrives:
+
+* Verify GCM tag
+* Hash plaintext (optional)
+* Mark bitset
+* Write chunk to disk at offset
+* Send ACK for that chunk (batched)
+
+ACK example:
+
+```json
+{ "type": "ack", "file_id": "...", "received": [200,201,202,250] }
+```
+
+Sender keeps a sliding window of unacked chunks.
+
+---
+
+## 🔁 6) Sliding window + resend (this is where robustness lives)
+
+Sender logic:
+
+* Keep max 256 in-flight chunks
+* If no ACK in 2s → resend
+* If peer disconnects → wait for reconnect
+* Resume from bitmap
+
+This alone solves **90% of failures**.
+
+---
+
+## 💔 7) Handle peer disconnects gracefully
+
+WebRTC will drop. A lot.
+
+On disconnect:
+
+* Do NOT destroy session
+* Keep transfer state for X minutes
+* When peer reconnects via websocket signalling:
+
+  * Re-negotiate DataChannel
+  * Send `resume_request`
+  * Receiver sends bitmap
+  * Continue
+
+This is how Syncthing resumes instantly.
+
+---
+
+## 💓 8) Heartbeats (most people forget this)
+
+Every 3 seconds over control channel:
+
+```json
+{ "type": "ping", "t": 123123 }
+```
+
+If no pong for 10s:
+
+* Pause sending
+* Mark peer as “stale”
+* Await reconnection
+
+Prevents you flooding a dead channel.
+
+---
+
+## 🧾 9) Integrity verification after transfer
+
+After all chunks received:
+
+Receiver computes full file SHA256 and compares with `file_offer`.
+
+If mismatch:
+
+* Send `corrupt_chunks_request`
+* Include list of bad chunk indexes
+* Sender resends only those
+
+You now have **BitTorrent-grade integrity**.
+
+---
+
+## 🧨 10) Protect against out-of-order, duplicate, and replay
+
+Because data channel is unordered:
+
+* Ignore chunk if bitmap already set
+* Ignore chunk if index ≥ total_chunks
+* Maintain session nonce to prevent replay across sessions
+
+---
+
+## 🧵 11) Backpressure (huge for browser stability)
+
+If receiver’s write queue grows:
+
+Receiver sends:
+
+```json
+{ "type": "slow_down", "window": 64 }
+```
+
+Sender reduces in-flight window.
+
+Without this, browsers crash on big files.
+
+---
+
+## 🔐 12) Crypto robustness details
+
+* AES-GCM with random nonce per chunk
+* Derive per-file key using HKDF from session key
+* Never reuse nonce
+* Authenticate chunk index inside AAD
+
+AAD example:
+
+```
+AAD = file_id || chunk_index
+```
+
+Prevents chunk swapping attacks.
+
+---
+
+## 🗂 13) Persist transfer state to disk (THIS is pro level)
+
+Store:
+
+```
+transfers/
+  file_id.json   (bitmap, meta)
+  file_id.data   (partial file)
+```
+
+If browser/tab crashes → user can reopen and resume.
+
+This is what makes it feel “magic”.
+
+---
+
+## 🧭 14) WebSocket signalling should be stateless
+
+WebSocket only for:
+
+* Peer discovery
+* Exchange SDP/ICE
+* Reconnect peers
+
+Never send file data here.
+
+---
+
+## 🧪 15) Test against the real enemies
+
+Simulate:
+
+* Kill tab mid transfer
+* Switch WiFi → Mobile data
+* Throttle network to 100kbps
+* Drop every 10th packet
+* Sleep laptop for 2 minutes
+
+If it survives these → you built it right.
+
+---
+
+## 🧠 Mental model
+
+You are **building BitTorrent over WebRTC**, not “sending chunks”.
+
+That mindset changes everything.
+
+---
+
+## ✅ Checklist
+
+* [ ] Dual data channels
+* [ ] Chunk bitmap
+* [ ] Sliding window resend
+* [ ] Resume protocol
+* [ ] Per-chunk AES-GCM
+* [ ] Heartbeats
+* [ ] Backpressure
+* [ ] Integrity recheck
+* [ ] Persistent state
+* [ ] Stateless signalling
+
+Do these and your app will feel **shockingly reliable**, even on bad networks.
+
+---
+
+If you want, next step I can give you:
+**exact message protocol spec** you can copy into your Go + JS code.
+
+
+
+
+
+
