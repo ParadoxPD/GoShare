@@ -1788,7 +1788,9 @@
     │   │   │       │     });
     │   │   │       │ 
     │   │   │       │     // Connect WebSocket
-    │   │   │       │     wsManager.current.connect();
+    │   │   │       │     wsManager.current.connect().catch((err) => {
+    │   │   │       │       console.error("Failed to establish WebSocket connection:", err);
+    │   │   │       │     });
     │   │   │       │ 
     │   │   │       │     // Cleanup
     │   │   │       │     return () => {
@@ -2982,6 +2984,20 @@
     │   │   │       │   const estimate = await navigator.storage.estimate();
     │   │   │       │   return estimate.usage || 0;
     │   │   │       │ }
+    │   │   │       ╰────────────────────────
+    │   │   ├── [338B] globals.ts
+    │   │   │       ╭── content of globals.ts ──
+    │   │   │       │ const isDev = import.meta.env.MODE === "development";
+    │   │   │       │ 
+    │   │   │       │ export const API_CONFIG = {
+    │   │   │       │   // Use the explicit IP to avoid the IPv6/IPv4 localhost confusion
+    │   │   │       │   WS_URL: isDev
+    │   │   │       │     ? "ws://127.0.0.1:4001/ws"
+    │   │   │       │     : "wss://your-production-domain.com/ws",
+    │   │   │       │   BASE_URL: isDev
+    │   │   │       │     ? "http://127.0.0.1:4001"
+    │   │   │       │     : "https://your-production-domain.com",
+    │   │   │       │ };
     │   │   │       ╰────────────────────────
     │   │   ├── [16K] transfer.ts
     │   │   │       ╭── content of transfer.ts ──
@@ -4234,6 +4250,7 @@
     │   │           │ // ===================================
     │   │           │ 
     │   │           │ import type { WebSocketMsg, RTCSignal } from "../types";
+    │   │           │ import { API_CONFIG } from "./globals";
     │   │           │ import { log } from "./utils";
     │   │           │ 
     │   │           │ export interface WebSocketCallbacks {
@@ -4273,8 +4290,7 @@
     │   │           │ 
     │   │           │   constructor(callbacks: WebSocketCallbacks = {}) {
     │   │           │     this.callbacks = callbacks;
-    │   │           │     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    │   │           │     this.url = `${protocol}//${window.location.host}/ws`;
+    │   │           │     this.url = API_CONFIG.WS_URL;
     │   │           │   }
     │   │           │ 
     │   │           │   // ===================================
@@ -4285,6 +4301,7 @@
     │   │           │     return new Promise((resolve, reject) => {
     │   │           │       try {
     │   │           │         this.isIntentionallyClosed = false;
+    │   │           │         console.log(this.url);
     │   │           │         this.ws = new WebSocket(this.url);
     │   │           │ 
     │   │           │         this.ws.onopen = () => {
@@ -4936,26 +4953,15 @@
     ├── [732B] tsconfig.app.json
     ├── [119B] tsconfig.json
     ├── [653B] tsconfig.node.json
-    └── [351B] vite.config.ts
+    └── [164B] vite.config.ts
             ╭── content of vite.config.ts ──
             │ import { defineConfig } from "vite";
             │ import react from "@vitejs/plugin-react";
             │ 
+            │ // https://vite.dev/config/
             │ export default defineConfig({
             │   plugins: [react()],
-            │   server: {
-            │     proxy: {
-            │       "/ws": {
-            │         target: "ws://localhost:4001",
-            │         ws: true,
-            │       },
-            │       "/health": {
-            │         target: "http://localhost:4001",
-            │         changeOrigin: true,
-            │       },
-            │     },
-            │   },
             │ });
             ╰────────────────────────
 
-📁 26 directories, 📄 61 files
+📁 26 directories, 📄 62 files

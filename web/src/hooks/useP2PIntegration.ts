@@ -123,7 +123,9 @@ export function useP2PIntegration() {
     });
 
     // Connect WebSocket
-    wsManager.current.connect();
+    wsManager.current.connect().catch((err) => {
+      console.error("Failed to establish WebSocket connection:", err);
+    });
 
     // Cleanup
     return () => {
