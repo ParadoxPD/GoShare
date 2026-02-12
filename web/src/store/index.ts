@@ -9,6 +9,8 @@ import type {
   Role,
   Tab,
   ConnectionStatus,
+  WebSocketConnectionState,
+  RTCConnectionState,
 } from "../types";
 
 interface AppState {
@@ -21,6 +23,8 @@ interface AppState {
   peerId: string | null;
   receiverCount: number;
   connectionStatus: ConnectionStatus;
+  wsState: WebSocketConnectionState;
+  rtcState: RTCConnectionState;
   encryptionKey: string;
 
   // ===================================
@@ -55,6 +59,8 @@ interface AppState {
   setPeerId: (id: string | null) => void;
   setReceiverCount: (count: number) => void;
   setConnectionStatus: (status: Partial<ConnectionStatus>) => void;
+  setWsState: (state: WebSocketConnectionState) => void;
+  setRtcState: (state: RTCConnectionState) => void;
   setEncryptionKey: (key: string) => void;
 
   // ===================================
@@ -103,6 +109,8 @@ const initialState = {
     websocket: false,
     webrtc: false,
   },
+  wsState: "disconnected" as WebSocketConnectionState,
+  rtcState: "new" as RTCConnectionState,
   encryptionKey: "",
   selectedFiles: [],
   transfers: new Map<string, FileTransfer>(),
@@ -112,7 +120,7 @@ const initialState = {
   notifications: [],
 };
 
-export const useStore = create<AppState>((set, get) => ({
+export const useStore = create<AppState>((set) => ({
   ...initialState,
 
   // ===================================
@@ -133,6 +141,10 @@ export const useStore = create<AppState>((set, get) => ({
     set((state) => ({
       connectionStatus: { ...state.connectionStatus, ...status },
     })),
+
+  setWsState: (wsState) => set({ wsState }),
+
+  setRtcState: (rtcState) => set({ rtcState }),
 
   setEncryptionKey: (encryptionKey) => set({ encryptionKey }),
 

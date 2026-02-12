@@ -26,7 +26,7 @@ import { log } from "./utils";
 // CONSTANTS
 // ===================================
 
-const CHUNK_SIZE = 256 * 1024; // 256KB for WebRTC
+const CHUNK_SIZE = 16 * 1024; // 16KB to avoid RTCDataChannel message-size failures
 const WINDOW_SIZE = 128; // Sliding window size
 const RESEND_TIMEOUT = 2000; // 2 seconds
 const HEARTBEAT_INTERVAL = 3000; // 3 seconds
@@ -42,11 +42,15 @@ export class TransferManager {
   private encryptionKey: string;
   private senders = new Map<string, SenderState>();
   private receivers = new Map<string, ReceiverState>();
-  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private ackBatches = new Map<string, number[]>();
-  private ackTimer: NodeJS.Timeout | null = null;
+  private ackTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(encryptionKey: string) {
+    this.encryptionKey = encryptionKey;
+  }
+
+  setEncryptionKey(encryptionKey: string): void {
     this.encryptionKey = encryptionKey;
   }
 
@@ -461,7 +465,7 @@ export class TransferManager {
     });
   }
 
-  private handlePong(msg: { t: "pong"; timestamp: number }): void {
+  private handlePong(_msg: { t: "pong"; timestamp: number }): void {
     // Update last heartbeat time for all active transfers
     this.senders.forEach((state) => {
       state.lastHeartbeat = Date.now();
@@ -563,7 +567,7 @@ export class TransferManager {
 
       // Check for stale connections
       const now = Date.now();
-      this.senders.forEach((state, fileId) => {
+      this.senders.forEach((state) => {
         if (now - state.lastHeartbeat > HEARTBEAT_TIMEOUT) {
           log(`Connection stale for ${state.file.name}`, "warning");
 

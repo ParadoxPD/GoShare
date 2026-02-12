@@ -9,7 +9,7 @@ import { WebRTCConnection } from "../lib/webrtc";
 import { TransferManager } from "../lib/transfer";
 import type { Role, FileTransfer, Message } from "../types";
 import { encryptText, decryptText } from "../lib/crypto";
-import { getConnectionId, log, downloadBlob } from "../lib/utils";
+import { getConnectionId, log } from "../lib/utils";
 
 export interface UseP2PTransferOptions {
   encryptionKey: string;
@@ -89,7 +89,7 @@ export function useP2PTransfer({ encryptionKey, role }: UseP2PTransferOptions) {
         setReceiverCount(count);
       },
 
-      onWebRTCSignal: async (signal, fromId, targetId) => {
+      onWebRTCSignal: async (signal, fromId, _targetId) => {
         if (!rtcConnection.current) return;
 
         try {
@@ -131,7 +131,7 @@ export function useP2PTransfer({ encryptionKey, role }: UseP2PTransferOptions) {
         }
       },
 
-      onTextAck: (messageId, receivers) => {
+      onTextAck: (_messageId, receivers) => {
         log(`Message delivered to ${receivers} receiver(s)`, "success");
       },
 
@@ -247,7 +247,8 @@ export function useP2PTransfer({ encryptionKey, role }: UseP2PTransferOptions) {
             id: fileId!,
             name: file.name,
             size: file.size,
-            totalChunks: Math.ceil(file.size / (256 * 1024)),
+            totalChunks: Math.ceil(file.size / (16 * 1024)),
+            chunkSize: 16 * 1024,
             progress: 0,
             speed: 0,
             status: "transferring" as const,
@@ -310,7 +311,8 @@ export function useP2PTransfer({ encryptionKey, role }: UseP2PTransferOptions) {
           id: fileId,
           name: file.name,
           size: file.size,
-          totalChunks: Math.ceil(file.size / (256 * 1024)),
+          totalChunks: Math.ceil(file.size / (16 * 1024)),
+          chunkSize: 16 * 1024,
           progress: 0,
           speed: 0,
           status: "pending" as const,
@@ -351,95 +353,10 @@ export function useP2PTransfer({ encryptionKey, role }: UseP2PTransferOptions) {
     }
   };
 
-  // Handle incoming file offers (receiver side)
   useEffect(() => {
-    if (!transferManager.current || role !== "receiver") return;
-
-    const handleFileOffer = (offer: any) => {
-      if (offer.t !== "file_offer") return;
-
-      const fileId = offer.fileId;
-
-      setTransfers((prev) => {
-        const updated = new Map(prev);
-        updated.set(fileId, {
-          id: fileId,
-          name: offer.name,
-          size: offer.size,
-          totalChunks: offer.totalChunks,
-          progress: 0,
-          speed: 0,
-          status: "transferring" as const,
-        });
-        return updated;
-      });
-
-      transferManager.current?.setupReceiver(offer, {
-        onProgress: (progress) => {
-          setTransfers((prev) => {
-            const updated = new Map(prev);
-            const existing = updated.get(fileId);
-
-            if (existing) {
-              updated.set(fileId, {
-                ...existing,
-                progress,
-              });
-            }
-
-            return updated;
-          });
-        },
-
-        onComplete: (blob) => {
-          downloadBlob(blob, offer.name);
-
-          setTransfers((prev) => {
-            const updated = new Map(prev);
-            const existing = updated.get(fileId);
-
-            if (existing) {
-              updated.set(fileId, {
-                ...existing,
-                progress: 100,
-                status: "complete" as const,
-              });
-            }
-
-            return updated;
-          });
-
-          log(`File received: ${offer.name}`, "success");
-        },
-
-        onError: (error) => {
-          setTransfers((prev) => {
-            const updated = new Map(prev);
-            const existing = updated.get(fileId);
-
-            if (existing) {
-              updated.set(fileId, {
-                ...existing,
-                status: "error" as const,
-                error,
-              });
-            }
-
-            return updated;
-          });
-
-          log(`Transfer error: ${error}`, "error");
-        },
-      });
-    };
-
-    // Listen for file offers via control messages
-    // This is a simplified version - in production you'd have a proper event system
-    if (rtcConnection.current) {
-      const originalHandler = rtcConnection.current;
-      // Store original callbacks and wrap them
-    }
-  }, [role, transferManager.current, rtcConnection.current]);
+    // Receiver-side file offer handling is implemented in useP2PIntegration.
+    // Keep this hook focused on sender-centric usage to satisfy strict TS checks.
+  }, [role]);
 
   return {
     // Connection state

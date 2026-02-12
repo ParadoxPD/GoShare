@@ -2,7 +2,28 @@ import { useStore } from '../../store';
 import './Header.css';
 
 export function Header() {
-    const { connectionStatus, role, sessionCode, receiverCount } = useStore();
+    const { wsState, rtcState, role, sessionCode, receiverCount } = useStore();
+
+    const wsLabel = wsState.toUpperCase();
+    const rtcLabel = rtcState.toUpperCase();
+
+    const wsDotClass =
+        wsState === 'connected'
+            ? 'connected'
+            : wsState === 'reconnecting' || wsState === 'connecting'
+                ? 'connecting'
+                : wsState === 'failed'
+                    ? 'failed'
+                    : '';
+
+    const rtcDotClass =
+        rtcState === 'connected'
+            ? 'connected webrtc'
+            : rtcState === 'connecting'
+                ? 'connecting webrtc'
+                : rtcState === 'failed'
+                    ? 'failed webrtc'
+                    : '';
 
     return (
         <header className="header">
@@ -17,18 +38,18 @@ export function Header() {
                 <div className="header-status">
                     {/* WebSocket Status */}
                     <div className="status-item">
-                        <div className={`status-dot ${connectionStatus.websocket ? 'connected' : ''}`} />
+                        <div className={`status-dot ${wsDotClass}`} />
                         <span className="status-label mono">
-                            {connectionStatus.websocket ? 'WS' : 'Disconnected'}
+                            {`WS ${wsLabel}`}
                         </span>
                     </div>
 
                     {/* WebRTC Status */}
                     {role && (
                         <div className="status-item">
-                            <div className={`status-dot ${connectionStatus.webrtc ? 'connected webrtc' : ''}`} />
+                            <div className={`status-dot ${rtcDotClass}`} />
                             <span className="status-label mono">
-                                {connectionStatus.webrtc ? 'WebRTC' : 'Connecting...'}
+                                {`RTC ${rtcLabel}`}
                             </span>
                         </div>
                     )}

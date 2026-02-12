@@ -31,15 +31,15 @@ export async function encryptChunk(
   const aadBytes = aad ? new TextEncoder().encode(aad) : undefined;
 
   // Encrypt with AES-GCM (includes auth tag automatically)
-  const encrypted = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce,
-      additionalData: aadBytes,
-    },
-    key,
-    buffer,
-  );
+  const aesParams: AesGcmParams = {
+    name: "AES-GCM",
+    iv: nonce,
+  };
+  if (aadBytes) {
+    aesParams.additionalData = aadBytes;
+  }
+
+  const encrypted = await crypto.subtle.encrypt(aesParams, key, buffer);
 
   // Combine: nonce + ciphertext (includes 16-byte auth tag)
   const result = new Uint8Array(nonce.length + encrypted.byteLength);
@@ -61,7 +61,7 @@ export async function decryptChunk(
   keyStr: string,
   aad?: string,
 ): Promise<ArrayBuffer> {
-  const bytes = base64ToArrayBuffer(base64);
+  const bytes = new Uint8Array(base64ToArrayBuffer(base64));
 
   // Extract nonce and ciphertext
   const nonce = bytes.slice(0, 12);
@@ -81,15 +81,15 @@ export async function decryptChunk(
 
   try {
     // Decrypt and verify auth tag
-    return await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: nonce,
-        additionalData: aadBytes,
-      },
-      key,
-      ciphertext,
-    );
+    const aesParams: AesGcmParams = {
+      name: "AES-GCM",
+      iv: nonce,
+    };
+    if (aadBytes) {
+      aesParams.additionalData = aadBytes;
+    }
+
+    return await crypto.subtle.decrypt(aesParams, key, ciphertext);
   } catch (error) {
     throw new Error("Decryption failed - chunk corrupted or tampered");
   }
@@ -158,7 +158,7 @@ export function arrayBufferToBase64(buffer: ArrayBuffer | Uint8Array): string {
   return btoa(binary);
 }
 
-export function base64ToArrayBuffer(base64: string): Uint8Array {
+export function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const binaryString = atob(base64);
   const len = binaryString.length;
   const bytes = new Uint8Array(len);
@@ -167,7 +167,7 @@ export function base64ToArrayBuffer(base64: string): Uint8Array {
     bytes[i] = binaryString.charCodeAt(i);
   }
 
-  return bytes;
+  return bytes.buffer as ArrayBuffer;
 }
 
 // ===================================

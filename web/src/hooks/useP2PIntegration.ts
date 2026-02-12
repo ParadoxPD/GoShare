@@ -10,6 +10,7 @@ import { WebRTCConnection } from "../lib/webrtc";
 import { TransferManager } from "../lib/transfer";
 import { encryptText, decryptText } from "../lib/crypto";
 import { getConnectionId, log, downloadBlob } from "../lib/utils";
+import { eventBus } from "../lib/events";
 import type { FileOfferMsg } from "../types";
 
 export function useP2PIntegration() {
@@ -23,18 +24,42 @@ export function useP2PIntegration() {
   // ===================================
 
   useEffect(() => {
+    const unsubscribers: Array<() => void> = [];
+
+    unsubscribers.push(
+      eventBus.on("connection:ws_state", ({ state }) => {
+        store.setConnectionStatus({ websocket: state === "connected" });
+        store.setWsState(state);
+      }),
+    );
+
+    unsubscribers.push(
+      eventBus.on("connection:rtc_state", ({ state }) => {
+        store.setConnectionStatus({ webrtc: state === "connected" });
+        store.setRtcState(state);
+      }),
+    );
+
+    unsubscribers.push(
+      eventBus.on("connection:error", ({ scope, message }) => {
+        log(`${scope.toUpperCase()} error: ${message}`, "error");
+      }),
+    );
+
     // Initialize transfer manager
-    transferManager.current = new TransferManager(store.encryptionKey);
+    transferManager.current = new TransferManager(useStore.getState().encryptionKey);
 
     // Initialize WebSocket
     wsManager.current = new WebSocketManager({
       onOpen: () => {
         store.setConnectionStatus({ websocket: true });
+        store.setWsState("connected");
         store.addNotification("Connected to server", "success");
       },
 
       onClose: () => {
         store.setConnectionStatus({ websocket: false });
+        store.setWsState("disconnected");
       },
 
       onCode: (code, fromId) => {
@@ -61,35 +86,63 @@ export function useP2PIntegration() {
         store.setReceiverCount(count);
       },
 
-      onWebRTCSignal: async (signal, fromId, targetId) => {
-        if (!rtcConnection.current) return;
+      onWebRTCSignal: async (signal, fromId, _targetId) => {
+        log(`📨 Received WebRTC signal: ${signal.type} from ${fromId}`, "info");
+
+        if (!rtcConnection.current) {
+          log("⚠️ Received signal but WebRTC not initialized", "warning");
+          return;
+        }
 
         try {
           if (signal.type === "offer" && signal.sdp) {
+            log("📥 Processing offer...", "info");
             await rtcConnection.current.handleOffer(signal.sdp);
             const answer = await rtcConnection.current.createAnswer();
+            log("📝 Created answer", "success");
+            const currentState = useStore.getState();
+            const { sessionCode, myId } = currentState;
 
-            wsManager.current?.sendWebRTCSignal(
+            if (!sessionCode || !myId) {
+              log("Cannot send answer - missing session state", "warning");
+              return;
+            }
+
+            const sent = wsManager.current?.sendWebRTCSignal(
               { type: "answer", sdp: answer },
-              store.sessionCode!,
-              store.myId!,
+              sessionCode,
+              myId,
               fromId,
             );
+
+            if (sent) {
+              log("✅ Answer sent successfully", "success");
+            } else {
+              log("⚠️ Answer queued", "warning");
+            }
           } else if (signal.type === "answer" && signal.sdp) {
+            log("📥 Processing answer...", "info");
             await rtcConnection.current.handleAnswer(signal.sdp);
+            log("✅ Answer processed", "success");
           } else if (signal.type === "ice" && signal.candidate) {
+            log(
+              `📥 Adding ICE candidate (${signal.candidate.candidate})`,
+              "info",
+            );
             await rtcConnection.current.addICECandidate(signal.candidate);
           }
         } catch (error) {
-          log(`WebRTC signal error: ${error}`, "error");
+          log(`❌ WebRTC signal error: ${error}`, "error");
+          console.error("Signal processing error:", error, "Signal:", signal);
         }
       },
 
       onTextMessage: async (text, messageId, senderName, timestamp) => {
         try {
-          const decrypted = await decryptText(text, store.encryptionKey);
+          const currentState = useStore.getState();
+          const decrypted = await decryptText(text, currentState.encryptionKey);
 
-          store.addMessage({
+          currentState.addMessage({
             id: messageId,
             text: decrypted,
             timestamp,
@@ -97,14 +150,16 @@ export function useP2PIntegration() {
             senderName,
           });
 
-          store.addNotification("New message received", "info");
+          currentState.addNotification("New message received", "info");
         } catch (error) {
           log("Failed to decrypt message", "error");
-          store.addNotification("Failed to decrypt message", "error");
+          useStore
+            .getState()
+            .addNotification("Failed to decrypt message", "error");
         }
       },
 
-      onTextAck: (messageId, receivers) => {
+      onTextAck: (_messageId, receivers) => {
         log(`Message delivered to ${receivers} receiver(s)`, "success");
       },
 
@@ -119,6 +174,7 @@ export function useP2PIntegration() {
       onSenderDisconnected: () => {
         store.addNotification("Sender disconnected", "error");
         store.setConnectionStatus({ webrtc: false });
+        store.setRtcState("disconnected");
       },
     });
 
@@ -129,11 +185,18 @@ export function useP2PIntegration() {
 
     // Cleanup
     return () => {
+      log("🧹 Cleaning up P2P integration", "info");
+      unsubscribers.forEach((unsubscribe) => unsubscribe());
       wsManager.current?.disconnect();
       rtcConnection.current?.close();
       transferManager.current?.cleanup();
+
+      // Clear refs
+      wsManager.current = null;
+      rtcConnection.current = null;
+      transferManager.current = null;
     };
-  }, [store.encryptionKey]);
+  }, []);
 
   // ===================================
   // SETUP WEBRTC
@@ -141,14 +204,25 @@ export function useP2PIntegration() {
 
   const setupWebRTC = async (isSender: boolean) => {
     if (rtcConnection.current) {
+      log("🔄 Closing existing WebRTC connection", "warning");
       rtcConnection.current.close();
     }
 
+    log(`🚀 Setting up WebRTC as ${isSender ? "SENDER" : "RECEIVER"}`, "info");
+    const currentState = useStore.getState();
+    log(
+      `📋 Store state - sessionCode: ${currentState.sessionCode}, myId: ${currentState.myId}, peerId: ${currentState.peerId}`,
+      "info",
+    );
+
     rtcConnection.current = new WebRTCConnection(isSender, {
       onChannelOpen: () => {
+        log("✅ Data channel opened, starting key exchange", "success");
         rtcConnection.current?.exchangeKeys();
       },
+
       onConnectionStateChange: (state) => {
+        log(`🔌 WebRTC state: ${state}`, "info");
         store.setConnectionStatus({ webrtc: state === "connected" });
 
         if (state === "connected") {
@@ -158,24 +232,18 @@ export function useP2PIntegration() {
         }
       },
 
-      // ✨ NEW: Handle completed key exchange
       onKeyExchangeComplete: (sharedSecret) => {
-        console.log("🔐 Shared encryption key established");
+        log("🔐 Shared encryption key established", "success");
         store.setEncryptionKey(sharedSecret);
-
-        // Now set connection for transfer manager
+        transferManager.current?.setEncryptionKey(sharedSecret);
         transferManager.current?.setConnection(rtcConnection.current!);
-
         store.addNotification("Secure connection established", "success");
       },
 
       onControlMessage: (data) => {
-        // Handle file offers on receiver side
-        if (data.t === "file_offer" && store.role === "receiver") {
+        if (data.t === "file_offer" && useStore.getState().role === "receiver") {
           handleFileOffer(data as FileOfferMsg);
         }
-
-        // Pass to transfer manager
         transferManager.current?.handleControlMessage(data);
       },
 
@@ -184,39 +252,85 @@ export function useP2PIntegration() {
       },
 
       onICECandidate: (candidate) => {
-        if (store.sessionCode && store.myId && store.peerId) {
-          wsManager.current?.sendWebRTCSignal(
-            { type: "ice", candidate },
-            store.sessionCode,
-            store.myId,
-            store.peerId,
+        const currentState = useStore.getState();
+        const { sessionCode, myId, peerId } = currentState;
+
+        if (!sessionCode || !myId || !peerId) {
+          log("⚠️ Cannot send ICE candidate - missing session info", "warning");
+          log(
+            `  sessionCode: ${sessionCode}, myId: ${myId}, peerId: ${peerId}`,
+            "warning",
           );
+          return;
+        }
+
+        log(`📤 Sending ICE candidate: ${candidate.type || "unknown"}`, "info");
+        const sent = wsManager.current?.sendWebRTCSignal(
+          { type: "ice", candidate },
+          sessionCode,
+          myId,
+          peerId,
+        );
+
+        if (!sent) {
+          log("❌ Failed to send ICE candidate", "error");
         }
       },
 
       onError: (error) => {
-        log(`WebRTC error: ${error.message}`, "error");
-        store.addNotification(`WebRTC error: ${error.message}`, "error");
+        const friendlyMessages: Record<string, string> = {
+          "Connection timeout":
+            "Connection timed out. Check your internet connection.",
+          "Connection failed": "Failed to connect. Try refreshing the page.",
+          "Key exchange failed":
+            "Security setup failed. Please restart the session.",
+        };
+
+        const message = friendlyMessages[error.message] || error.message;
+        log(`WebRTC error: ${message}`, "error");
+        store.addNotification(message, "error");
       },
     });
 
     // Create and send offer (sender only)
-    if (isSender && store.sessionCode && store.myId && store.peerId) {
+    if (isSender) {
+      const currentState = useStore.getState();
+      const { sessionCode, myId, peerId } = currentState;
+      if (!sessionCode || !myId || !peerId) {
+        log("❌ Cannot create offer - missing session info", "error");
+        log(
+          `  sessionCode: ${sessionCode}, myId: ${myId}, peerId: ${peerId}`,
+          "error",
+        );
+        return;
+      }
+
       try {
+        log("📝 Creating WebRTC offer...", "info");
         const offer = await rtcConnection.current.createOffer();
 
-        wsManager.current?.sendWebRTCSignal(
+        log(`📤 Sending offer to ${peerId}`, "info");
+        const sent = wsManager.current?.sendWebRTCSignal(
           { type: "offer", sdp: offer },
-          store.sessionCode,
-          store.myId,
-          store.peerId,
+          sessionCode,
+          myId,
+          peerId,
         );
+
+        if (sent) {
+          log("✅ Offer sent successfully", "success");
+        } else {
+          log("❌ Failed to send offer", "error");
+          throw new Error("Failed to send WebRTC offer");
+        }
       } catch (error) {
-        log(`Failed to create offer: ${error}`, "error");
+        log(`Failed to create/send offer: ${error}`, "error");
+        store.addNotification("Failed to establish connection", "error");
       }
+    } else {
+      log("📥 Waiting for offer from sender...", "info");
     }
   };
-
   // ===================================
   // HANDLE FILE OFFER (RECEIVER)
   // ===================================
@@ -230,6 +344,7 @@ export function useP2PIntegration() {
       name: offer.name,
       size: offer.size,
       totalChunks: offer.totalChunks,
+      chunkSize: offer.chunkSize,
       progress: 0,
       speed: 0,
       status: "transferring",
@@ -281,6 +396,14 @@ export function useP2PIntegration() {
       store.addNotification("Not ready to send files", "warning");
       return;
     }
+    if (!rtcConnection.current?.isConnected()) {
+      store.setConnectionStatus({ webrtc: false });
+      store.addNotification(
+        "Peer connection is not active. Reconnect before sending files.",
+        "warning",
+      );
+      return;
+    }
 
     if (store.selectedFiles.length === 0) {
       store.addNotification("No files selected", "warning");
@@ -288,9 +411,14 @@ export function useP2PIntegration() {
     }
 
     for (const file of store.selectedFiles) {
-      const fileId = await transferManager.current.sendFile(file, {
+      let fileId: string | null = null;
+
+      fileId = await transferManager.current.sendFile(file, {
         onProgress: (progress, speed) => {
-          store.updateTransfer(fileId!, {
+          if (!fileId) return;
+
+          eventBus.emit("transfer:progress", { fileId, progress, speed });
+          store.updateTransfer(fileId, {
             progress,
             speed,
             status: "transferring",
@@ -298,7 +426,10 @@ export function useP2PIntegration() {
         },
 
         onComplete: () => {
-          store.updateTransfer(fileId!, {
+          if (!fileId) return;
+
+          eventBus.emit("transfer:complete", { fileId, fileName: file.name });
+          store.updateTransfer(fileId, {
             progress: 100,
             status: "complete",
           });
@@ -307,10 +438,18 @@ export function useP2PIntegration() {
         },
 
         onError: (error) => {
-          store.updateTransfer(fileId!, {
-            status: "error",
-            error,
+          eventBus.emit("transfer:error", {
+            fileId: fileId || undefined,
+            fileName: file.name,
+            reason: error,
           });
+
+          if (fileId) {
+            store.updateTransfer(fileId, {
+              status: "error",
+              error,
+            });
+          }
 
           store.addNotification(`Transfer error: ${error}`, "error");
         },
@@ -321,7 +460,8 @@ export function useP2PIntegration() {
           id: fileId,
           name: file.name,
           size: file.size,
-          totalChunks: Math.ceil(file.size / (256 * 1024)),
+          totalChunks: Math.ceil(file.size / (16 * 1024)),
+          chunkSize: 16 * 1024,
           progress: 0,
           speed: 0,
           status: "pending",
@@ -334,25 +474,32 @@ export function useP2PIntegration() {
   };
 
   const sendTextMessage = async (text: string) => {
-    if (!store.sessionCode) {
+    const currentState = useStore.getState();
+
+    if (!currentState.sessionCode) {
       store.addNotification("No active session", "warning");
+      return;
+    }
+    if (!wsManager.current?.isConnected()) {
+      store.setConnectionStatus({ websocket: false });
+      store.addNotification("Not connected to signaling server", "error");
       return;
     }
 
     try {
-      const encrypted = await encryptText(text, store.encryptionKey);
+      const encrypted = await encryptText(text, currentState.encryptionKey);
       const messageId = crypto.randomUUID();
-      const senderName = store.role === "sender" ? "Sender" : "Receiver";
+      const senderName = currentState.role === "sender" ? "Sender" : "Receiver";
 
-      const success = wsManager.current?.sendTextMessage(
+      const success = wsManager.current.sendTextMessage(
         encrypted,
-        store.sessionCode,
+        currentState.sessionCode,
         messageId,
         senderName,
       );
 
       if (success) {
-        store.addMessage({
+        currentState.addMessage({
           id: messageId,
           text,
           timestamp: Date.now(),
@@ -360,11 +507,15 @@ export function useP2PIntegration() {
           senderName: "You",
         });
 
-        store.addNotification("Message sent", "success");
+        currentState.addNotification("Message sent", "success");
+      } else {
+        currentState.addNotification("Message queued. Waiting for connection.", "warning");
       }
     } catch (error) {
-      log("Failed to send message", "error");
-      store.addNotification("Failed to send message", "error");
+      const message =
+        error instanceof Error ? error.message : "Unknown message send error";
+      log(`Failed to send message: ${message}`, "error");
+      store.addNotification(`Failed to send message: ${message}`, "error");
     }
   };
 

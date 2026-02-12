@@ -228,18 +228,34 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 			sess.NotifySenderReceiverJoined(peer.ID)
 
-		// ─────────────────────────────
+			// ─────────────────────────────
 		// WEBRTC SIGNAL RELAY
 		// ─────────────────────────────
 		case "webrtc_signal":
 			if currentSession == nil {
 				log.Printf("⚠️ WebRTC signal from %s without session", peer.ID)
+				ws.SafeWrite(conn, &writeMu, mustJSON(protocol.Message{
+					Type:  "error",
+					Error: "No active session",
+				}))
 				continue
 			}
 
-			log.Printf("🔄 Routing WebRTC signal from %s to %s", msg.FromID, msg.TargetID)
+			// Determine signal type for better logging
+			signalType := "unknown"
+			var signalData map[string]interface{}
+			if err := json.Unmarshal(msg.Signal, &signalData); err == nil {
+				if st, ok := signalData["type"].(string); ok {
+					signalType = st
+				}
+			}
+
+			log.Printf("📡 Routing WebRTC %s signal: %s → %s (session %s)",
+				signalType, msg.FromID, msg.TargetID, currentSession.Code)
+
 			currentSession.RouteSignal(msg)
 
+			log.Printf("✅ Signal relayed successfully")
 		// ─────────────────────────────
 		// TEXT CHAT RELAY
 		// ─────────────────────────────
@@ -261,15 +277,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 			}
 
 		// ─────────────────────────────
-		// PING (for debugging)
+		// PING/PONG HEARTBEAT
 		// ─────────────────────────────
 		case "ping":
-			// Respond with current time
+			// Respond with pong containing the original timestamp
+			var pingTime int64
+			if msg.Timestamp > 0 {
+				pingTime = msg.Timestamp
+			} else {
+				pingTime = time.Now().Unix()
+			}
+
 			ws.SafeWrite(conn, &writeMu, mustJSON(protocol.Message{
 				Type:      "pong",
-				Timestamp: time.Now().Unix(),
+				Timestamp: pingTime,
 			}))
-
 		default:
 			log.Printf("⚠️ Unknown message type: %s from %s", msg.Type, peer.ID)
 		}

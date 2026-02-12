@@ -13,10 +13,10 @@ export const API_CONFIG = {
 
 // Add connection health check utilities
 export const CONNECTION_CONFIG = {
-  PING_INTERVAL: 30000, // 30 seconds
-  PING_TIMEOUT: 10000, // 10 seconds
+  PING_INTERVAL: 30000, // 30 seconds (was too frequent)
+  PING_TIMEOUT: 45000, // 45 seconds (was only 10!)
   MAX_RECONNECT_ATTEMPTS: 10,
-  RECONNECT_DELAY: 2000, // 2 seconds
+  RECONNECT_DELAY: 2000,
   RECONNECT_BACKOFF_MULTIPLIER: 1.5,
-  MAX_RECONNECT_DELAY: 30000, // 30 seconds max
+  MAX_RECONNECT_DELAY: 30000,
 };

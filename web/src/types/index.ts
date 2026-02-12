@@ -101,7 +101,8 @@ export type WebSocketMsg =
   | { type: "text_ack"; messageId: string; receivers: number }
   | { type: "error"; error: string }
   | { type: "warning"; error: string }
-  | { type: "sender_disconnected" };
+  | { type: "sender_disconnected" }
+  | { type: "pong" };
 
 export interface RTCSignal {
   type?: "offer" | "answer" | "ice";
@@ -143,7 +144,7 @@ export interface SenderState {
   totalChunks: number;
   windowSize: number;
   lastHeartbeat: number;
-  resendTimers: Map<number, NodeJS.Timeout>;
+  resendTimers: Map<number, ReturnType<typeof setTimeout>>;
   onProgress?: (progress: number, speed: number) => void;
   onComplete?: () => void;
   onError?: (error: string) => void;
@@ -168,6 +169,17 @@ export type ConnectionStatus = {
   websocket: boolean;
   webrtc: boolean;
 };
+
+export type WebSocketConnectionState =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "degraded"
+  | "failed"
+  | "closed";
+
+export type RTCConnectionState = RTCPeerConnectionState | "new";
 
 export type Role = "sender" | "receiver";
 

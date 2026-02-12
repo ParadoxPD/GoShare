@@ -64,6 +64,17 @@
     animation: pulse 2s ease-in-out infinite;
 }
 
+.status-dot.connecting {
+    background: var(--accent-warning);
+    box-shadow: 0 0 10px rgba(245, 158, 11, 0.45);
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+.status-dot.failed {
+    background: var(--accent-error);
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.55);
+}
+
 .status-dot.webrtc {
     background: var(--accent-primary);
     box-shadow: 0 0 10px rgba(0, 212, 255, 0.5);

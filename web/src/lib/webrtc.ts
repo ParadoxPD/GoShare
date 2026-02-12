@@ -3,7 +3,6 @@
 // Enhanced error handling, state management, and key exchange
 // ===================================
 
-import type { RTCSignal } from "../types";
 import {
   deriveSharedSecret,
   exportAESKey,
@@ -11,6 +10,7 @@ import {
   generateECDHKeyPair,
   importPublicKey,
 } from "./crypto";
+import { eventBus } from "./events";
 import { log } from "./utils";
 
 const RTC_CONFIG: RTCConfiguration = {
@@ -41,7 +41,6 @@ export class WebRTCConnection {
   private isSender: boolean;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
-  private reconnectDelay = 2000;
   private iceGatheringTimeout: ReturnType<typeof setTimeout> | null = null;
   private connectionTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -50,6 +49,7 @@ export class WebRTCConnection {
   private sharedSecretString: string | null = null;
   private keyExchangeComplete = false;
   private pendingMessages: any[] = [];
+  private isClosing = false;
 
   constructor(isSender: boolean, callbacks: WebRTCCallbacks = {}) {
     this.isSender = isSender;
@@ -117,6 +117,7 @@ export class WebRTCConnection {
     // Connection state monitoring
     pc.onconnectionstatechange = () => {
       log(`🔌 WebRTC connection state: ${pc.connectionState}`, "info");
+      eventBus.emit("connection:rtc_state", { state: pc.connectionState });
       this.callbacks.onConnectionStateChange?.(pc.connectionState);
 
       switch (pc.connectionState) {
@@ -136,6 +137,10 @@ export class WebRTCConnection {
 
         case "failed":
           log("❌ WebRTC connection failed", "error");
+          eventBus.emit("connection:error", {
+            scope: "rtc",
+            message: "WebRTC connection failed",
+          });
           this.handleConnectionFailure();
           break;
 
@@ -172,10 +177,14 @@ export class WebRTCConnection {
     this.connectionTimeout = setTimeout(() => {
       if (this.pc.connectionState !== "connected") {
         log("⏱️ WebRTC connection timeout", "error");
+        eventBus.emit("connection:error", {
+          scope: "rtc",
+          message: "WebRTC connection timeout",
+        });
         this.callbacks.onError?.(new Error("Connection timeout"));
         this.handleConnectionFailure();
       }
-    }, 30000); // 30 seconds
+    }, 60000); // 60 seconds (was 30)
   }
 
   private createDataChannels(): void {
@@ -221,6 +230,7 @@ export class WebRTCConnection {
     channel.binaryType = "arraybuffer";
 
     channel.onopen = () => {
+      if (this.isClosing) return;
       log("✅ Control channel opened", "success");
       this.callbacks.onChannelOpen?.();
 
@@ -229,10 +239,19 @@ export class WebRTCConnection {
     };
 
     channel.onclose = () => {
+      if (this.isClosing) {
+        log("Control channel closed during shutdown", "info");
+        return;
+      }
       log("⚠️ Control channel closed", "warning");
     };
 
     channel.onerror = (error) => {
+      if (this.isExpectedCloseError(error)) {
+        log("Ignoring control channel close error during shutdown", "info");
+        return;
+      }
+
       log(`❌ Control channel error: ${error}`, "error");
       console.error("Control channel error details:", error);
       this.callbacks.onError?.(new Error("Control channel error"));
@@ -287,6 +306,10 @@ export class WebRTCConnection {
       }
     } catch (error) {
       log(`❌ Failed to exchange keys: ${error}`, "error");
+      eventBus.emit("connection:error", {
+        scope: "rtc",
+        message: "Key exchange failed",
+      });
       throw error;
     }
   }
@@ -321,6 +344,10 @@ export class WebRTCConnection {
     } catch (error) {
       log(`❌ Key exchange failed: ${error}`, "error");
       console.error("Key exchange error details:", error);
+      eventBus.emit("connection:error", {
+        scope: "rtc",
+        message: "Failed to derive shared secret",
+      });
       this.callbacks.onError?.(new Error("Key exchange failed"));
     }
   }
@@ -337,16 +364,27 @@ export class WebRTCConnection {
     channel.binaryType = "arraybuffer";
 
     channel.onopen = () => {
+      if (this.isClosing) return;
       log("✅ Data channel opened", "success");
     };
 
     channel.onclose = () => {
+      if (this.isClosing) {
+        log("Data channel closed during shutdown", "info");
+        return;
+      }
       log("⚠️ Data channel closed", "warning");
     };
 
     channel.onerror = (error) => {
+      if (this.isExpectedCloseError(error)) {
+        log("Ignoring data channel close error during shutdown", "info");
+        return;
+      }
+
       log(`❌ Data channel error: ${error}`, "error");
       console.error("Data channel error details:", error);
+      this.callbacks.onError?.(new Error("Data channel error"));
     };
 
     channel.onmessage = (event) => {
@@ -533,7 +571,7 @@ export class WebRTCConnection {
   }
 
   private async restartICE(): Promise<void> {
-    if (this.pc.connectionState === "closed") {
+    if (this.isClosing || this.pc.connectionState === "closed") {
       log("Cannot restart ICE - connection closed", "warning");
       return;
     }
@@ -553,6 +591,7 @@ export class WebRTCConnection {
 
   close(): void {
     log("🔌 Closing WebRTC connection", "info");
+    this.isClosing = true;
 
     if (this.iceGatheringTimeout) {
       clearTimeout(this.iceGatheringTimeout);
@@ -569,6 +608,23 @@ export class WebRTCConnection {
     this.sharedSecret = null;
     this.sharedSecretString = null;
     this.pendingMessages = [];
+  }
+
+  private isExpectedCloseError(error: Event): boolean {
+    if (this.isClosing) return true;
+
+    if ("error" in error) {
+      const rtcErrorEvent = error as RTCErrorEvent;
+      const details = String(rtcErrorEvent.error || "");
+      if (
+        details.includes("User-Initiated Abort") ||
+        details.includes("Close called")
+      ) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   // ===================================
@@ -588,5 +644,41 @@ export class WebRTCConnection {
       pendingMessages: this.pendingMessages.length,
       reconnectAttempts: this.reconnectAttempts,
     };
+  }
+
+  async getConnectionStats(): Promise<any> {
+    if (!this.pc) return null;
+
+    const stats = await this.pc.getStats();
+    const report: any = {
+      ice: { local: [], remote: [] },
+      connection: {},
+    };
+
+    stats.forEach((stat) => {
+      if (stat.type === "candidate-pair" && stat.state === "succeeded") {
+        report.connection = {
+          bytesReceived: stat.bytesReceived,
+          bytesSent: stat.bytesSent,
+          currentRoundTripTime: stat.currentRoundTripTime,
+        };
+      }
+      if (stat.type === "local-candidate") {
+        report.ice.local.push({
+          type: stat.candidateType,
+          protocol: stat.protocol,
+          address: stat.address,
+        });
+      }
+      if (stat.type === "remote-candidate") {
+        report.ice.remote.push({
+          type: stat.candidateType,
+          protocol: stat.protocol,
+          address: stat.address,
+        });
+      }
+    });
+
+    return report;
   }
 }

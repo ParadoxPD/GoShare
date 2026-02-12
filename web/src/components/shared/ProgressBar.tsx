@@ -29,14 +29,6 @@ export function ProgressBar({
         paused: '⏸',
     };
 
-    const statusColors = {
-        pending: 'var(--text-tertiary)',
-        transferring: 'var(--accent-primary)',
-        complete: 'var(--accent-success)',
-        error: 'var(--accent-error)',
-        paused: 'var(--accent-warning)',
-    };
-
     return (
         <div className={`progress-bar-container status-${status}`}>
             <div className="progress-header">
