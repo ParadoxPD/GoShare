@@ -11,43 +11,22 @@ import './styles/globals.css';
 import './App.css';
 
 export function App() {
-  const { role, encryptionKey, setEncryptionKey } = useStore();
-  const [isLoading, setIsLoading] = useState(true);
+  const { role } = useStore();
+  const [isReady, setIsReady] = useState(false);
   const p2p = useP2PIntegration();
 
-  // Mobile optimization - prevent screen from sleeping
   useWakeLock();
 
-  // Load encryption key from server
+  // ✅ No more fetching encryption key!
   useEffect(() => {
-    fetch('/config')
-      .then((res) => res.json())
-      .then((config) => {
-        setEncryptionKey(config.key);
-        setIsLoading(false);
-      })
-      .catch((error) => {
-        console.error('Failed to load config:', error);
-        // Fallback to a default key (NOT RECOMMENDED for production)
-        setEncryptionKey('default-key-change-me');
-        setIsLoading(false);
-      });
-  }, [setEncryptionKey]);
+    setIsReady(true);
+  }, []);
 
-  if (isLoading) {
+  if (!isReady) {
     return (
       <div className="app-loading">
         <div className="loading-spinner" />
-        <p>Initializing secure connection...</p>
-      </div>
-    );
-  }
-
-  if (!encryptionKey) {
-    return (
-      <div className="app-error">
-        <h2>Configuration Error</h2>
-        <p>Failed to load encryption configuration.</p>
+        <p>Initializing...</p>
       </div>
     );
   }
@@ -55,13 +34,11 @@ export function App() {
   return (
     <div className="app">
       <Header />
-
       <main className="app-content">
         {!role && <LandingView />}
         {role === 'sender' && <SenderView p2p={p2p} />}
         {role === 'receiver' && <ReceiverView p2p={p2p} />}
       </main>
-
       <Notifications />
     </div>
   );

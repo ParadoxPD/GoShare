@@ -169,3 +169,62 @@ export function base64ToArrayBuffer(base64: string): Uint8Array {
 
   return bytes;
 }
+
+// ===================================
+// ECDH KEY EXCHANGE
+// ===================================
+
+export async function generateECDHKeyPair(): Promise<CryptoKeyPair> {
+  return await crypto.subtle.generateKey(
+    {
+      name: "ECDH",
+      namedCurve: "P-256",
+    },
+    true, // extractable
+    ["deriveKey"],
+  );
+}
+
+export async function exportPublicKey(publicKey: CryptoKey): Promise<string> {
+  const exported = await crypto.subtle.exportKey("raw", publicKey);
+  return arrayBufferToBase64(exported);
+}
+
+export async function importPublicKey(base64: string): Promise<CryptoKey> {
+  const buffer = base64ToArrayBuffer(base64);
+  return await crypto.subtle.importKey(
+    "raw",
+    buffer,
+    {
+      name: "ECDH",
+      namedCurve: "P-256",
+    },
+    false,
+    [],
+  );
+}
+
+export async function deriveSharedSecret(
+  privateKey: CryptoKey,
+  peerPublicKey: CryptoKey,
+): Promise<CryptoKey> {
+  return await crypto.subtle.deriveKey(
+    {
+      name: "ECDH",
+      public: peerPublicKey,
+    },
+    privateKey,
+    {
+      name: "AES-GCM",
+      length: 256,
+    },
+    true, // extractable for our use
+    ["encrypt", "decrypt"],
+  );
+}
+
+// Convert CryptoKey to string for use in encryption functions
+export async function exportAESKey(key: CryptoKey): Promise<string> {
+  const exported = await crypto.subtle.exportKey("raw", key);
+  return arrayBufferToBase64(exported);
+}

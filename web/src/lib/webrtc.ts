@@ -4,6 +4,13 @@
 // ===================================
 
 import type { RTCSignal } from "../types";
+import {
+  deriveSharedSecret,
+  exportAESKey,
+  exportPublicKey,
+  generateECDHKeyPair,
+  importPublicKey,
+} from "./crypto";
 
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -18,6 +25,8 @@ export interface WebRTCCallbacks {
   onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
   onICECandidate?: (candidate: RTCIceCandidate) => void;
   onError?: (error: Error) => void;
+  onKeyExchangeComplete?: (sharedSecret: string) => void; // ✨ NEW
+  onChannelOpen?: () => void;
 }
 
 export class WebRTCConnection {
@@ -30,16 +39,26 @@ export class WebRTCConnection {
   private maxReconnectAttempts = 5;
   private reconnectDelay = 2000;
 
+  private ecdhKeyPair: CryptoKeyPair | null = null;
+  private sharedSecret: CryptoKey | null = null;
+
   constructor(isSender: boolean, callbacks: WebRTCCallbacks = {}) {
     this.isSender = isSender;
     this.callbacks = callbacks;
     this.pc = this.createPeerConnection();
+
+    // Generate ECDH key pair immediately
+    this.initializeKeyExchange();
 
     if (isSender) {
       this.createDataChannels();
     } else {
       this.setupDataChannelHandlers();
     }
+  }
+
+  private async initializeKeyExchange(): Promise<void> {
+    this.ecdhKeyPair = await generateECDHKeyPair();
   }
 
   private createPeerConnection(): RTCPeerConnection {
@@ -110,6 +129,7 @@ export class WebRTCConnection {
   private setupControlChannel(channel: RTCDataChannel): void {
     channel.onopen = () => {
       console.log("✅ Control channel opened");
+      this.callbacks.onChannelOpen?.();
     };
 
     channel.onclose = () => {
@@ -124,11 +144,74 @@ export class WebRTCConnection {
     channel.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        // Handle key exchange messages
+        if (data.t === "ecdh_public_key") {
+          this.handlePeerPublicKey(data.publicKey);
+          return;
+        }
+
         this.callbacks.onControlMessage?.(data);
       } catch (error) {
         console.error("Failed to parse control message:", error);
       }
     };
+  }
+
+  async exchangeKeys(): Promise<void> {
+    if (!this.ecdhKeyPair) {
+      throw new Error("ECDH key pair not initialized");
+    }
+
+    // Export and send our public key
+    const publicKeyBase64 = await exportPublicKey(this.ecdhKeyPair.publicKey);
+
+    this.sendControl({
+      t: "ecdh_public_key",
+      publicKey: publicKeyBase64,
+    });
+
+    console.log("✨ Sent ECDH public key to peer");
+  }
+
+  private async handlePeerPublicKey(publicKeyBase64: string): Promise<void> {
+    if (!this.ecdhKeyPair) {
+      console.error("ECDH key pair not initialized");
+      return;
+    }
+
+    try {
+      console.log("✨ Received peer's ECDH public key");
+
+      // Import peer's public key
+      const peerPublicKey = await importPublicKey(publicKeyBase64);
+
+      // Derive shared secret
+      this.sharedSecret = await deriveSharedSecret(
+        this.ecdhKeyPair.privateKey,
+        peerPublicKey,
+      );
+
+      // Export as string for use in encryption
+      const sharedSecretString = await exportAESKey(this.sharedSecret);
+
+      console.log("✅ ECDH key exchange complete");
+
+      // Notify application
+      this.callbacks.onKeyExchangeComplete?.(sharedSecretString);
+
+      // Send our public key if we haven't yet (receiver case)
+      if (!this.isSender) {
+        await this.exchangeKeys();
+      }
+    } catch (error) {
+      console.error("❌ Key exchange failed:", error);
+      this.callbacks.onError?.(new Error("Key exchange failed"));
+    }
+  }
+
+  getSharedSecret(): string | null {
+    return this.sharedSecret ? exportAESKey(this.sharedSecret) : null;
   }
 
   private setupDataChannel(channel: RTCDataChannel): void {

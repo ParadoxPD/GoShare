@@ -36,7 +36,7 @@ export function SenderView({ p2p }: SenderViewProps) {
 
     // Create session on mount
     useEffect(() => {
-        if (!sessionCode) {
+        if (connectionStatus.websocket && !sessionCode) {
             p2p.createSession();
         }
     }, [sessionCode, p2p]);

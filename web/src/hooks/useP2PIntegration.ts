@@ -23,8 +23,6 @@ export function useP2PIntegration() {
   // ===================================
 
   useEffect(() => {
-    if (!store.encryptionKey) return;
-
     // Initialize transfer manager
     transferManager.current = new TransferManager(store.encryptionKey);
 
@@ -145,6 +143,30 @@ export function useP2PIntegration() {
     }
 
     rtcConnection.current = new WebRTCConnection(isSender, {
+      onChannelOpen: () => {
+        rtcConnection.current?.exchangeKeys();
+      },
+      onConnectionStateChange: (state) => {
+        store.setConnectionStatus({ webrtc: state === "connected" });
+
+        if (state === "connected") {
+          store.addNotification("WebRTC connected", "success");
+        } else if (state === "failed") {
+          store.addNotification("WebRTC connection failed", "error");
+        }
+      },
+
+      // ✨ NEW: Handle completed key exchange
+      onKeyExchangeComplete: (sharedSecret) => {
+        console.log("🔐 Shared encryption key established");
+        store.setEncryptionKey(sharedSecret);
+
+        // Now set connection for transfer manager
+        transferManager.current?.setConnection(rtcConnection.current!);
+
+        store.addNotification("Secure connection established", "success");
+      },
+
       onControlMessage: (data) => {
         // Handle file offers on receiver side
         if (data.t === "file_offer" && store.role === "receiver") {
@@ -157,17 +179,6 @@ export function useP2PIntegration() {
 
       onDataMessage: (data) => {
         transferManager.current?.handleReceivedChunk(data);
-      },
-
-      onConnectionStateChange: (state) => {
-        store.setConnectionStatus({ webrtc: state === "connected" });
-
-        if (state === "connected") {
-          store.addNotification("WebRTC connected", "success");
-          transferManager.current?.setConnection(rtcConnection.current!);
-        } else if (state === "failed") {
-          store.addNotification("WebRTC connection failed", "error");
-        }
       },
 
       onICECandidate: (candidate) => {
