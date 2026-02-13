@@ -6,8 +6,10 @@ import (
 	"GoShare/internal/session"
 	"GoShare/internal/util"
 	"GoShare/internal/ws"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync"
@@ -16,6 +18,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
+
+//go:embed web
+var webFS embed.FS
 
 type Server struct {
 	sessions *session.Manager
@@ -48,7 +53,31 @@ func (s *Server) Router() http.Handler {
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/health", s.handleHealth)
 
-	// IMPROVED: Add CORS middleware
+	// Get the subdirectory inside the embedded FS
+	dist, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatal("Failed to embed web assets:", err)
+	}
+
+	fileServer := http.FileServer(http.FS(dist))
+
+	// CHANGED: Use a closure to handle SPA routing (fallback to index.html)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Check if file exists in the embedded FS
+		f, err := dist.Open(r.URL.Path[1:]) // trim leading slash
+		if err == nil {
+			// File exists (e.g., assets/index.js), serve it
+			defer f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+
+		// File not found? It might be a client-side route.
+		// Serve index.html instead.
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	})
+
 	return corsMiddleware(mux)
 }
 
@@ -72,7 +101,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status":   "healthy",
 		"time":     time.Now().Unix(),
 		"sessions": s.sessions.Count(),

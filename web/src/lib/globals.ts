@@ -3,12 +3,8 @@ const isDev = import.meta.env.MODE === "development";
 export const API_CONFIG = {
   // FIXED: Changed port from 4001 to 4000 to match backend default
   // Use the explicit IP to avoid the IPv6/IPv4 localhost confusion
-  WS_URL: isDev
-    ? "ws://127.0.0.1:4000/ws"
-    : "wss://your-production-domain.com/ws",
-  BASE_URL: isDev
-    ? "http://127.0.0.1:4000"
-    : "https://your-production-domain.com",
+  WS_URL: isDev ? "ws://127.0.0.1:4000/ws" : "wss://goshare.paradoxpd.tech/ws",
+  BASE_URL: isDev ? "http://127.0.0.1:4000" : "https://goshare.paradoxpd.tech",
 };
 
 // Add connection health check utilities
