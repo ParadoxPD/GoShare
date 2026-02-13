@@ -40,24 +40,73 @@ export function ReceiverView({ p2p }: ReceiverViewProps) {
 
     const startScanning = async () => {
         try {
-            setScanning(true);
-            const scanner = new Html5Qrcode('qr-reader');
-            qrScannerRef.current = scanner;
+            const host = window.location.hostname;
+            const isLocalDevHost = host === 'localhost' || host === '127.0.0.1';
+            if (!window.isSecureContext && !isLocalDevHost) {
+                addNotification('Camera requires HTTPS on this device. Open the app over HTTPS to scan QR.', 'error');
+                return;
+            }
 
-            await scanner.start(
-                { facingMode: 'environment' },
-                { fps: 10, qrbox: 250 },
-                (decodedText) => {
-                    setCode(decodedText);
-                    stopScanning();
-                    addNotification('QR code scanned!', 'success');
-                },
-                () => {
-                    // Error scanning frame - ignore
+            setScanning(true);
+            const cameras = await Html5Qrcode.getCameras().catch(() => []);
+            const preferredCamera = cameras.find(
+                (camera) => /back|rear|environment/i.test(camera.label),
+            ) || cameras[cameras.length - 1];
+
+            const cameraStrategies: Array<string | MediaTrackConstraints> = [];
+            if (preferredCamera) {
+                cameraStrategies.push(preferredCamera.id);
+            }
+            cameraStrategies.push({ facingMode: { exact: 'environment' } });
+            cameraStrategies.push({ facingMode: 'environment' });
+            cameraStrategies.push({ facingMode: 'user' });
+
+            let started = false;
+            let lastError: unknown = null;
+
+            for (const strategy of cameraStrategies) {
+                const scanner = new Html5Qrcode('qr-reader');
+                qrScannerRef.current = scanner;
+                try {
+                    await scanner.start(
+                        strategy,
+                        { fps: 10, qrbox: 250, aspectRatio: 1 },
+                        (decodedText) => {
+                            setCode(decodedText);
+                            stopScanning();
+                            addNotification('QR code scanned!', 'success');
+                        },
+                        () => {
+                            // Error scanning frame - ignore
+                        }
+                    );
+                    started = true;
+                    break;
+                } catch (error) {
+                    lastError = error;
+                    try {
+                        await scanner.stop();
+                    } catch {
+                        // Ignore stop failures between fallback attempts
+                    }
+                    scanner.clear();
+                    qrScannerRef.current = null;
                 }
-            );
+            }
+
+            if (!started) {
+                throw lastError || new Error('No compatible camera configuration found');
+            }
         } catch (error) {
-            addNotification('Camera access denied or not available', 'error');
+            const message = error instanceof Error ? error.message : 'Camera access denied or not available';
+            const normalized = message.toLowerCase();
+            const hint = normalized.includes('notallowed') || normalized.includes('permission')
+                ? 'Allow camera permission in browser settings, then retry.'
+                : normalized.includes('notfound') || normalized.includes('no camera')
+                    ? 'No camera was found on this device/browser.'
+                    : 'Ensure camera is not in use by another app and try again.';
+
+            addNotification(`Camera error: ${message}. ${hint}`, 'error');
             setScanning(false);
         }
     };
@@ -65,6 +114,7 @@ export function ReceiverView({ p2p }: ReceiverViewProps) {
     const stopScanning = () => {
         if (qrScannerRef.current) {
             qrScannerRef.current.stop().catch(() => { });
+            qrScannerRef.current.clear();
             qrScannerRef.current = null;
         }
         setScanning(false);

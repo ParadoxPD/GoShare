@@ -27,11 +27,12 @@ import { log } from "./utils";
 // ===================================
 
 const CHUNK_SIZE = 16 * 1024; // 16KB to avoid RTCDataChannel message-size failures
-const WINDOW_SIZE = 128; // Sliding window size
+const WINDOW_SIZE = 32; // Sliding window size (reduced for mobile/browser stability)
 const RESEND_TIMEOUT = 2000; // 2 seconds
 const HEARTBEAT_INTERVAL = 3000; // 3 seconds
 const HEARTBEAT_TIMEOUT = 10000; // 10 seconds
 const ACK_BATCH_DELAY = 50; // 50ms batching window
+const SEND_BACKPRESSURE_THRESHOLD = 4 * 1024 * 1024; // 4MB
 
 // ===================================
 // TRANSFER MANAGER
@@ -146,10 +147,9 @@ export class TransferManager {
 
     // Check backpressure (buffered data in WebRTC)
     const buffered = this.connection.getBufferedAmount();
-    if (buffered > 16 * 1024 * 1024) {
-      // 16MB threshold
+    if (buffered > SEND_BACKPRESSURE_THRESHOLD) {
       log(`Backpressure detected (${buffered} bytes buffered)`, "warning");
-      setTimeout(() => this.pumpChunks(fileId), 100);
+      setTimeout(() => this.pumpChunks(fileId), 75);
       return;
     }
 
@@ -161,7 +161,12 @@ export class TransferManager {
       const nextChunk = this.findNextChunk(state);
       if (nextChunk === null) break;
 
-      await this.sendChunk(fileId, nextChunk);
+      const sent = await this.sendChunk(fileId, nextChunk);
+      if (!sent) {
+        // Channel queue is saturated; retry soon without marking this chunk as sent
+        setTimeout(() => this.pumpChunks(fileId), 75);
+        break;
+      }
       state.sent.add(nextChunk);
 
       // Set resend timer
@@ -186,9 +191,9 @@ export class TransferManager {
     return null;
   }
 
-  private async sendChunk(fileId: string, index: number): Promise<void> {
+  private async sendChunk(fileId: string, index: number): Promise<boolean> {
     const state = this.senders.get(fileId);
-    if (!state || !this.connection) return;
+    if (!state || !this.connection) return false;
 
     const start = index * CHUNK_SIZE;
     const end = Math.min(start + CHUNK_SIZE, state.file.size);
@@ -206,7 +211,7 @@ export class TransferManager {
       aad,
     };
 
-    this.connection.sendData(chunk);
+    return this.connection.sendData(chunk);
   }
 
   // ===================================

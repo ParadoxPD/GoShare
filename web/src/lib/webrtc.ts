@@ -50,6 +50,7 @@ export class WebRTCConnection {
   private keyExchangeComplete = false;
   private pendingMessages: any[] = [];
   private isClosing = false;
+  private lastQueueFullLog = 0;
 
   constructor(isSender: boolean, callbacks: WebRTCCallbacks = {}) {
     this.isSender = isSender;
@@ -505,10 +506,34 @@ export class WebRTCConnection {
       return false;
     }
 
+    // Apply explicit backpressure before attempting send
+    const MAX_BUFFERED_AMOUNT = 4 * 1024 * 1024; // 4MB
+    if (this.dataChannel.bufferedAmount > MAX_BUFFERED_AMOUNT) {
+      const now = Date.now();
+      if (now - this.lastQueueFullLog > 1000) {
+        log(
+          `Data channel queue high (${this.dataChannel.bufferedAmount} bytes), deferring send`,
+          "warning",
+        );
+        this.lastQueueFullLog = now;
+      }
+      return false;
+    }
+
     try {
       this.dataChannel.send(JSON.stringify(data));
       return true;
     } catch (error) {
+      const message = String(error);
+      if (message.includes("send queue is full")) {
+        const now = Date.now();
+        if (now - this.lastQueueFullLog > 1000) {
+          log("Data channel send queue is full, retrying later", "warning");
+          this.lastQueueFullLog = now;
+        }
+        return false;
+      }
+
       log(`❌ Failed to send data message: ${error}`, "error");
       console.error("Data send error:", error);
       return false;
